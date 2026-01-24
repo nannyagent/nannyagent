@@ -583,3 +583,31 @@ type PatchPackageInfo struct {
 	UpdateType string `json:"update_type"` // install, update, remove
 	Details    string `json:"details"`
 }
+
+// Reboot Management Types
+
+// RebootStatus represents reboot operation lifecycle
+type RebootStatus string
+
+const (
+	RebootStatusPending   RebootStatus = "pending"
+	RebootStatusSent      RebootStatus = "sent"
+	RebootStatusRebooting RebootStatus = "rebooting"
+	RebootStatusCompleted RebootStatus = "completed"
+	RebootStatusFailed    RebootStatus = "failed"
+	RebootStatusTimeout   RebootStatus = "timeout"
+)
+
+// AgentRebootPayload is sent to agent via realtime for execution
+type AgentRebootPayload struct {
+	RebootID       string `json:"reboot_id"`
+	AgentID        string `json:"agent_id"`
+	LXCID          string `json:"lxc_id,omitempty"`
+	VMID           string `json:"vmid,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+	RequestedAt    string `json:"requested_at"`
+}
+
+// RebootHandler is a callback function that processes a reboot operation request
+type RebootHandler func(payload AgentRebootPayload)

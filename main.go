@@ -19,6 +19,7 @@ import (
 	"nannyagent/internal/patches"
 	"nannyagent/internal/proxmox"
 	"nannyagent/internal/realtime"
+	"nannyagent/internal/reboot"
 	"nannyagent/internal/types"
 )
 
@@ -555,10 +556,24 @@ func main() {
 			}
 		}
 
+		// Define the handler for reboot operations
+		rebootHandler := func(payload types.AgentRebootPayload) {
+			logging.Info("Triggering reboot operation %s...", payload.RebootID)
+
+			// Create reboot manager
+			rebootManager := reboot.NewRebootManager(cfg.APIBaseURL, authManager, agentID)
+
+			if err := rebootManager.HandleRebootOperation(payload); err != nil {
+				logging.Error("Reboot operation %s failed: %v", payload.RebootID, err)
+			} else {
+				logging.Info("Reboot operation %s completed successfully", payload.RebootID)
+			}
+		}
+
 		// Create and start the realtime client
 		// Use NANNYAPI_URL from env or default
 		pbURL := cfg.APIBaseURL
-		realtimeClient := realtime.NewClient(pbURL, accessToken, investigationHandler, patchHandler)
+		realtimeClient := realtime.NewClient(pbURL, accessToken, investigationHandler, patchHandler, rebootHandler)
 		realtimeClient.Start()
 	}()
 
