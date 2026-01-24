@@ -288,7 +288,7 @@ Content-Type: application/json
 
 {
   "clientId": "client-abc123xyz",
-  "subscriptions": ["investigations", "patch_operations"]
+  "subscriptions": ["investigations", "patch_operations", "reboot_operations"]
 }
 ```
 
@@ -347,25 +347,79 @@ data: {"action":"create","record":{"id":"patch-op-456","agent_id":"agent-123","m
 }
 ```
 
+#### Reboot Operation Events
+
+```http
+event: record
+data: {"action":"create","record":{"id":"reboot-op-789","agent_id":"agent-123","lxc_id":"lxc-100","vmid":"100","reason":"Security patches applied","timeout_seconds":300,"requested_at":"2025-12-30T10:30:00Z"}}
+
+```
+
+**Parsed Event:**
+```json
+{
+  "action": "create",
+  "record": {
+    "id": "reboot-op-789",
+    "agent_id": "agent-123",
+    "lxc_id": "lxc-100",
+    "vmid": "100",
+    "reason": "Security patches applied",
+    "timeout_seconds": 300,
+    "requested_at": "2025-12-30T10:30:00Z"
+  }
+}
+```
+
 ### Connection Management
 
 **Features:**
-- Automatic reconnection on disconnect (5-second retry)
+- Automatic reconnection with exponential backoff on disconnect
 - Client ID tracking for subscription management
-- Multi-channel subscriptions
+- Multi-channel subscriptions (investigations, patch_operations, reboot_operations)
 - Graceful error handling
+- Unlimited retries - agent never gives up on reconnection
+
+**Exponential Backoff (SSE Reconnection):**
+
+When the SSE connection drops, the agent uses exponential backoff to prevent overwhelming the server:
+
+```text
+Attempt 0: Wait 30 seconds
+Attempt 1: Wait 60 seconds  (30 × 2^1)
+Attempt 2: Wait 120 seconds (30 × 2^2)
+Attempt 3: Wait 240 seconds (30 × 2^3)
+Attempt 4: Wait 480 seconds (30 × 2^4)
+Attempt 5+: Wait 1800 seconds (max: 30 minutes)
+```
+
+**Backoff Parameters:**
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Initial Backoff | 30 seconds | First retry delay |
+| Maximum Backoff | 30 minutes | Cap on retry delay |
+| Backoff Factor | 2.0 | Multiplier per attempt |
+| Retry Limit | Unlimited | Agent always retries |
+
+**Backoff Formula:**
+```
+backoff = min(MaxBackoff, InitialBackoff × 2^attempt)
+```
+
+The backoff counter resets to zero upon successful reconnection.
 
 **Code Example:**
 ```go
-// Start SSE client
+// Start SSE client with handlers
 client := realtime.NewClient(
     baseURL,
     accessToken,
     investigationHandler,
     patchHandler,
+    rebootHandler,
 )
 
-go client.Start() // Blocks until connection closed
+go client.Start() // Blocks until connection closed, auto-reconnects with backoff
 ```
 
 ## Investigations API
@@ -828,6 +882,149 @@ Content-Type: text/plain
 }
 ```
 
+## Reboot API
+
+The Reboot API manages **remote reboot operations** delivered via realtime SSE messages. When a system or container needs to be rebooted, the backend sends a reboot operation event through the realtime connection, which the agent processes automatically.
+
+### Reboot Operation Flow
+
+Reboot operations are initiated by the backend and delivered to agents via Server-Sent Events (SSE):
+
+```
+1. Backend determines a reboot is needed for an agent/container
+2. Backend creates reboot operation record in database with status "pending"
+3. Realtime SSE sends reboot_operations event to subscribed agent
+4. Agent receives event and acknowledges receipt (status -> "rebooting")
+5. Agent executes reboot command (systemctl reboot or pct reboot)
+6. System reboots and agent reconnects
+7. Backend detects reconnection and marks reboot as "completed"
+```
+
+### Realtime Reboot Event (Received via SSE)
+
+When a reboot is required, the agent receives a reboot operation event through its SSE connection:
+
+**Event Format:**
+```json
+{
+  "action": "create",
+  "record": {
+    "id": "reboot-op-789",
+    "agent_id": "agent-123",
+    "lxc_id": "lxc-100",
+    "vmid": "100",
+    "reason": "Security patches applied, reboot required",
+    "timeout_seconds": 300,
+    "requested_at": "2025-12-30T10:30:00Z"
+  }
+}
+```
+
+**Field Descriptions:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | Yes | Unique reboot operation ID |
+| `agent_id` | string | Yes | Agent ID that should perform the reboot |
+| `lxc_id` | string | No | LXC container ID (e.g., "lxc-100") if targeting container |
+| `vmid` | string | No | VM/Container numeric ID (e.g., "100") - preferred over lxc_id |
+| `reason` | string | No | Human-readable reason for the reboot |
+| `timeout_seconds` | int | No | Maximum time to wait for reboot completion |
+| `requested_at` | string | Yes | ISO 8601 timestamp of when reboot was requested |
+
+**Reboot Types:**
+
+1. **Host Reboot** (no `vmid` or `lxc_id`):
+   - Reboots the entire host system
+   - Uses `systemctl reboot` with fallback to `shutdown -r now`
+   - Agent reconnects after system restart
+
+2. **Container Reboot** (`vmid` or `lxc_id` specified):
+   - Reboots only the specified LXC container
+   - Uses `pct reboot <vmid>` command
+   - Host system and agent remain running
+
+### Acknowledge Reboot
+
+After receiving a reboot event, the agent acknowledges it before executing:
+
+```bash
+POST /api/reboot/{reboot_id}/acknowledge
+Authorization: Bearer {access_token}
+```
+
+**Response:**
+```
+HTTP/1.1 204 No Content
+```
+
+The acknowledgment updates the reboot status from "pending" to "rebooting".
+
+### Report Reboot Failure
+
+If the reboot fails (e.g., command execution error), the agent reports the failure:
+
+```bash
+POST /api/reboot/{reboot_id}/fail
+Authorization: Bearer {access_token}
+Content-Type: application/json
+
+{
+  "error": "systemctl reboot failed: exit status 1"
+}
+```
+
+**Response:**
+```
+HTTP/1.1 204 No Content
+```
+
+### Reboot Status Values
+
+| Status | Description |
+|--------|-------------|
+| `pending` | Reboot requested, waiting for agent |
+| `sent` | Event sent to agent via SSE |
+| `rebooting` | Agent acknowledged, reboot in progress |
+| `completed` | Reboot successful, agent reconnected |
+| `failed` | Reboot failed, error reported |
+| `timeout` | Reboot timed out (no reconnection within timeout) |
+
+### Example: Container Reboot
+
+```bash
+# Reboot event received for container with vmid=100
+# Agent acknowledges:
+POST /api/reboot/reboot-op-789/acknowledge
+
+# Agent executes:
+pct reboot 100
+
+# If successful, container reboots and reconnects
+# If failed:
+POST /api/reboot/reboot-op-789/fail
+{
+  "error": "pct reboot 100: exit status 2: CT 100 not running"
+}
+```
+
+### Example: Host Reboot
+
+```bash
+# Reboot event received with no vmid/lxc_id
+# Agent acknowledges:
+POST /api/reboot/reboot-op-790/acknowledge
+
+# Agent executes:
+systemctl reboot
+
+# If systemctl fails, fallback to:
+shutdown -r now
+
+# System reboots, agent reconnects after startup
+# Backend marks reboot as completed upon reconnection
+```
+
 ## Error Handling
 
 ### HTTP Status Codes
@@ -854,19 +1051,48 @@ Content-Type: text/plain
 }
 ```
 
-### Retry Strategy (TO-BE-ADDED with exponential backoff)
+### Retry Strategy
 
-**Exponential Backoff:**
+**SSE Connection Backoff:**
+
+The SSE realtime connection uses exponential backoff with the following parameters:
+
 ```text
-Attempt 1: Wait 1 second
-Attempt 2: Wait 2 seconds
-Attempt 3: Wait 4 seconds
-Attempt 4: Wait 8 seconds
-Attempt 5: Wait 16 seconds
-Max: 32 seconds
+Initial Backoff: 30 seconds
+Maximum Backoff: 30 minutes
+Backoff Factor: 2.0
+Retry Limit: Unlimited (agent always retries)
+
+Attempt 0: 30 seconds
+Attempt 1: 60 seconds
+Attempt 2: 120 seconds (2 minutes)
+Attempt 3: 240 seconds (4 minutes)
+Attempt 4: 480 seconds (8 minutes)
+Attempt 5: 960 seconds (16 minutes)
+Attempt 6+: 1800 seconds (30 minutes max)
 ```
 
 **Implementation:**
+```go
+const (
+    InitialBackoff = 30 * time.Second
+    MaxBackoff     = 30 * time.Minute
+    BackoffFactor  = 2.0
+)
+
+func CalculateBackoff(attempt int) time.Duration {
+    if attempt < 0 {
+        attempt = 0
+    }
+    backoff := float64(InitialBackoff) * math.Pow(BackoffFactor, float64(attempt))
+    if backoff > float64(MaxBackoff) {
+        backoff = float64(MaxBackoff)
+    }
+    return time.Duration(backoff)
+}
+```
+
+**HTTP Request Retry (Generic):**
 ```go
 func retryWithBackoff(fn func() error, maxRetries int) error {
     for i := 0; i < maxRetries; i++ {
@@ -978,15 +1204,21 @@ patchHandler := func(payload types.AgentPatchPayload) {
     go patchManager.HandlePatchOperation(payload)
 }
 
-// Start SSE client
+rebootHandler := func(payload types.AgentRebootPayload) {
+    rebootManager := reboot.NewRebootManager(baseURL, authManager)
+    go rebootManager.HandleRebootOperation(payload)
+}
+
+// Start SSE client with all handlers
 client := realtime.NewClient(
     baseURL,
     accessToken,
     investigationHandler,
     patchHandler,
+    rebootHandler,
 )
 
-go client.Start()
+go client.Start() // Auto-reconnects with exponential backoff (30s initial, 30m max)
 ```
 
 ---
