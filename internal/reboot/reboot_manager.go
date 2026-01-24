@@ -21,17 +21,15 @@ type RebootManager struct {
 	authManager interface {
 		AuthenticatedRequest(method, url string, body []byte, headers map[string]string) (int, []byte, error)
 	}
-	agentID string
 }
 
 // NewRebootManager creates a new reboot manager
 func NewRebootManager(baseURL string, authManager interface {
 	AuthenticatedRequest(method, url string, body []byte, headers map[string]string) (int, []byte, error)
-}, agentID string) *RebootManager {
+}) *RebootManager {
 	return &RebootManager{
 		baseURL:     baseURL,
 		authManager: authManager,
-		agentID:     agentID,
 	}
 }
 
@@ -140,7 +138,7 @@ func (rm *RebootManager) reportFailure(rebootID string, errorMsg string) error {
 	url := fmt.Sprintf("%s/api/reboot/%s/fail", rm.baseURL, rebootID)
 
 	payload := map[string]string{
-		"error_message": errorMsg,
+		"error": errorMsg,
 	}
 
 	jsonData, err := json.Marshal(payload)

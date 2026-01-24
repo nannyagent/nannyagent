@@ -1205,7 +1205,7 @@ patchHandler := func(payload types.AgentPatchPayload) {
 }
 
 rebootHandler := func(payload types.AgentRebootPayload) {
-    rebootManager := reboot.NewRebootManager(authManager, logger)
+    rebootManager := reboot.NewRebootManager(baseURL, authManager)
     go rebootManager.HandleRebootOperation(payload)
 }
 

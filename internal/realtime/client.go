@@ -32,20 +32,17 @@ type InvestigationHandler func(investigationID, prompt string)
 // PatchHandler is a callback function that processes a patch operation request
 type PatchHandler func(payload types.AgentPatchPayload)
 
-// RebootHandler is a callback function that processes a reboot operation request
-type RebootHandler func(payload types.AgentRebootPayload)
-
 // Client handles the Realtime (SSE) connection to NannyAPI
 type Client struct {
 	baseURL              string
 	accessToken          string
 	investigationHandler InvestigationHandler
 	patchHandler         PatchHandler
-	rebootHandler        RebootHandler
+	rebootHandler        types.RebootHandler
 }
 
 // NewClient creates a new Realtime client
-func NewClient(baseURL, accessToken string, investigationHandler InvestigationHandler, patchHandler PatchHandler, rebootHandler RebootHandler) *Client {
+func NewClient(baseURL, accessToken string, investigationHandler InvestigationHandler, patchHandler PatchHandler, rebootHandler types.RebootHandler) *Client {
 	return &Client{
 		baseURL:              baseURL,
 		accessToken:          accessToken,

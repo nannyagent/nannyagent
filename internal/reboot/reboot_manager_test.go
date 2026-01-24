@@ -22,16 +22,13 @@ func (m *mockAuthManager) AuthenticatedRequest(method, url string, body []byte, 
 
 func TestNewRebootManager(t *testing.T) {
 	authManager := &mockAuthManager{}
-	rm := NewRebootManager("http://localhost:8090", authManager, "agent-123")
+	rm := NewRebootManager("http://localhost:8090", authManager)
 
 	if rm == nil {
 		t.Fatal("expected non-nil RebootManager")
 	}
 	if rm.baseURL != "http://localhost:8090" {
 		t.Errorf("expected baseURL 'http://localhost:8090', got '%s'", rm.baseURL)
-	}
-	if rm.agentID != "agent-123" {
-		t.Errorf("expected agentID 'agent-123', got '%s'", rm.agentID)
 	}
 }
 
@@ -40,7 +37,7 @@ func TestAcknowledgeReboot_Success(t *testing.T) {
 		statusCode: http.StatusOK,
 		response:   []byte(`{"success": true}`),
 	}
-	rm := NewRebootManager("http://localhost:8090", authManager, "agent-123")
+	rm := NewRebootManager("http://localhost:8090", authManager)
 
 	err := rm.AcknowledgeReboot("reboot-456")
 	if err != nil {
@@ -53,7 +50,7 @@ func TestAcknowledgeReboot_NoContent(t *testing.T) {
 		statusCode: http.StatusNoContent,
 		response:   nil,
 	}
-	rm := NewRebootManager("http://localhost:8090", authManager, "agent-123")
+	rm := NewRebootManager("http://localhost:8090", authManager)
 
 	err := rm.AcknowledgeReboot("reboot-456")
 	if err != nil {
@@ -66,7 +63,7 @@ func TestAcknowledgeReboot_Failure(t *testing.T) {
 		statusCode: http.StatusBadRequest,
 		response:   []byte(`{"error": "invalid reboot id"}`),
 	}
-	rm := NewRebootManager("http://localhost:8090", authManager, "agent-123")
+	rm := NewRebootManager("http://localhost:8090", authManager)
 
 	err := rm.AcknowledgeReboot("reboot-456")
 	if err == nil {
@@ -79,7 +76,7 @@ func TestReportFailure(t *testing.T) {
 		statusCode: http.StatusOK,
 		response:   []byte(`{}`),
 	}
-	rm := NewRebootManager("http://localhost:8090", authManager, "agent-123")
+	rm := NewRebootManager("http://localhost:8090", authManager)
 
 	err := rm.reportFailure("reboot-456", "test error message")
 	if err == nil {
@@ -100,7 +97,7 @@ func TestExecuteContainerReboot_Success(t *testing.T) {
 	}
 
 	authManager := &mockAuthManager{}
-	rm := NewRebootManager("http://localhost:8090", authManager, "agent-123")
+	rm := NewRebootManager("http://localhost:8090", authManager)
 
 	payload := types.AgentRebootPayload{
 		RebootID: "reboot-456",
@@ -126,7 +123,7 @@ func TestExecuteContainerReboot_WithLXCID(t *testing.T) {
 	}
 
 	authManager := &mockAuthManager{}
-	rm := NewRebootManager("http://localhost:8090", authManager, "agent-123")
+	rm := NewRebootManager("http://localhost:8090", authManager)
 
 	payload := types.AgentRebootPayload{
 		RebootID: "reboot-456",
@@ -157,7 +154,7 @@ func TestExecuteContainerReboot_PreferVMID(t *testing.T) {
 	}
 
 	authManager := &mockAuthManager{}
-	rm := NewRebootManager("http://localhost:8090", authManager, "agent-123")
+	rm := NewRebootManager("http://localhost:8090", authManager)
 
 	payload := types.AgentRebootPayload{
 		RebootID: "reboot-456",
@@ -189,7 +186,7 @@ func TestHandleRebootOperation_AcknowledgeFailure(t *testing.T) {
 		statusCode: http.StatusInternalServerError,
 		response:   []byte(`{"error": "server error"}`),
 	}
-	rm := NewRebootManager(server.URL, authManager, "agent-123")
+	rm := NewRebootManager(server.URL, authManager)
 
 	payload := types.AgentRebootPayload{
 		RebootID:       "reboot-456",
@@ -214,7 +211,7 @@ func TestExecuteReboot_HostReboot(t *testing.T) {
 	}
 
 	authManager := &mockAuthManager{}
-	rm := NewRebootManager("http://localhost:8090", authManager, "agent-123")
+	rm := NewRebootManager("http://localhost:8090", authManager)
 
 	payload := types.AgentRebootPayload{
 		RebootID: "reboot-456",
@@ -238,7 +235,7 @@ func TestExecuteReboot_ContainerReboot(t *testing.T) {
 	}
 
 	authManager := &mockAuthManager{}
-	rm := NewRebootManager("http://localhost:8090", authManager, "agent-123")
+	rm := NewRebootManager("http://localhost:8090", authManager)
 
 	payload := types.AgentRebootPayload{
 		RebootID: "reboot-456",

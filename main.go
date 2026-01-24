@@ -561,7 +561,7 @@ func main() {
 			logging.Info("Triggering reboot operation %s...", payload.RebootID)
 
 			// Create reboot manager
-			rebootManager := reboot.NewRebootManager(cfg.APIBaseURL, authManager, agentID)
+			rebootManager := reboot.NewRebootManager(cfg.APIBaseURL, authManager)
 
 			if err := rebootManager.HandleRebootOperation(payload); err != nil {
 				logging.Error("Reboot operation %s failed: %v", payload.RebootID, err)
