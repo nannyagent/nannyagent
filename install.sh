@@ -206,7 +206,95 @@ install_dependencies() {
     if ! command -v bpftrace &> /dev/null; then
         log_error "bpftrace installation failed or not in PATH"
         exit 7
-    fi    
+    fi
+
+    # Install syft for SBOM generation
+    install_syft
+}
+
+# Install syft for SBOM scanning
+install_syft() {
+    log_info "Installing syft for SBOM generation..."
+
+    # Check if syft is already installed
+    if command -v syft &> /dev/null; then
+        SYFT_VERSION=$(syft version 2>/dev/null | grep -oP 'Version:\s*\K[0-9.]+' || syft --version 2>/dev/null || echo "unknown")
+        log_info "syft is already installed (version: $SYFT_VERSION)"
+        return 0
+    fi
+
+    # Install syft using the official Anchore installer
+    log_info "Downloading syft installer from Anchore..."
+
+    SYFT_INSTALL_SCRIPT="https://raw.githubusercontent.com/anchore/syft/main/install.sh"
+    SYFT_INSTALL_DIR="/usr/local/bin"
+
+    if command -v curl &> /dev/null; then
+        curl -sSfL "$SYFT_INSTALL_SCRIPT" | sh -s -- -b "$SYFT_INSTALL_DIR" 2>&1 || {
+            log_warning "Failed to install syft using Anchore installer"
+            log_warning "Trying alternative installation method..."
+            install_syft_fallback
+            return $?
+        }
+    elif command -v wget &> /dev/null; then
+        wget -qO- "$SYFT_INSTALL_SCRIPT" | sh -s -- -b "$SYFT_INSTALL_DIR" 2>&1 || {
+            log_warning "Failed to install syft using Anchore installer"
+            log_warning "Trying alternative installation method..."
+            install_syft_fallback
+            return $?
+        }
+    else
+        log_warning "Neither curl nor wget found for syft installation"
+        install_syft_fallback
+        return $?
+    fi
+
+    # Verify syft installation
+    if command -v syft &> /dev/null; then
+        SYFT_VERSION=$(syft version 2>/dev/null | grep -oP 'Version:\s*\K[0-9.]+' || echo "installed")
+        log_success "syft installed successfully (version: $SYFT_VERSION)"
+    else
+        log_warning "syft installation could not be verified"
+        log_warning "SBOM scanning features may not work correctly"
+    fi
+}
+
+# Fallback syft installation via package managers
+install_syft_fallback() {
+    log_info "Attempting syft installation via package manager..."
+
+    if [ "$PKG_MANAGER" = "apt-get" ]; then
+        # Try installing from apt if available (some distros have it)
+        apt-get install -y -qq syft 2>/dev/null && {
+            log_success "syft installed via apt"
+            return 0
+        }
+    elif [ "$PKG_MANAGER" = "dnf" ]; then
+        dnf install -y -q syft 2>/dev/null && {
+            log_success "syft installed via dnf"
+            return 0
+        }
+    elif [ "$PKG_MANAGER" = "yum" ]; then
+        yum install -y -q syft 2>/dev/null && {
+            log_success "syft installed via yum"
+            return 0
+        }
+    elif [ "$PKG_MANAGER" = "pacman" ]; then
+        pacman -Sy --noconfirm syft 2>/dev/null && {
+            log_success "syft installed via pacman"
+            return 0
+        }
+    elif [ "$PKG_MANAGER" = "zypper" ]; then
+        zypper install -y syft 2>/dev/null && {
+            log_success "syft installed via zypper"
+            return 0
+        }
+    fi
+
+    log_warning "Could not install syft via package manager"
+    log_warning "SBOM scanning features will not be available"
+    log_warning "To install manually: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin"
+    return 1
 }
 
 # Download pre-built binary from GitHub releases

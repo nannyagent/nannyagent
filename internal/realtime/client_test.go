@@ -59,7 +59,7 @@ func TestClient_Start(t *testing.T) {
 		close(done)
 	}
 
-	client := NewClient(server.URL, "test-token", handler, nil, nil)
+	client := NewClient(server.URL, "test-token", handler, nil, nil, nil)
 
 	// Run Start in a goroutine
 	go client.Start()
@@ -183,7 +183,7 @@ func TestClient_RebootHandler(t *testing.T) {
 		close(done)
 	}
 
-	client := NewClient(server.URL, "test-token", nil, nil, rebootHandler)
+	client := NewClient(server.URL, "test-token", nil, nil, rebootHandler, nil)
 
 	go client.Start()
 
@@ -239,7 +239,7 @@ func TestClient_PatchHandler(t *testing.T) {
 		close(done)
 	}
 
-	client := NewClient(server.URL, "test-token", nil, patchHandler, nil)
+	client := NewClient(server.URL, "test-token", nil, patchHandler, nil, nil)
 
 	go client.Start()
 
@@ -248,5 +248,67 @@ func TestClient_PatchHandler(t *testing.T) {
 		// Success
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timeout waiting for patch handler")
+	}
+}
+
+// TestClient_SBOMHandler tests that SBOM scan requests are handled correctly
+func TestClient_SBOMHandler(t *testing.T) {
+	// Create a mock SSE server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/realtime" {
+			switch r.Method {
+			case "GET":
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+
+				_, _ = fmt.Fprintf(w, "data: {\"clientId\": \"test-client-id\"}\n\n")
+				w.(http.Flusher).Flush()
+
+				time.Sleep(100 * time.Millisecond)
+
+				// Send an SBOM scan event
+				sbomEvent := `{"action": "create", "record": {"id": "sbom-scan-123", "scan_type": "host", "status": "pending", "source_name": "test-server", "source_type": "filesystem", "created": "2026-01-30T10:00:00Z"}}`
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", sbomEvent)
+				w.(http.Flusher).Flush()
+
+				time.Sleep(1 * time.Second)
+				return
+			case "POST":
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	done := make(chan struct{})
+
+	sbomHandler := func(payload types.AgentSBOMPayload) {
+		if payload.ScanID != "sbom-scan-123" {
+			t.Errorf("Expected ScanID 'sbom-scan-123', got '%s'", payload.ScanID)
+		}
+		if payload.ScanType != "host" {
+			t.Errorf("Expected ScanType 'host', got '%s'", payload.ScanType)
+		}
+		if payload.SourceName != "test-server" {
+			t.Errorf("Expected SourceName 'test-server', got '%s'", payload.SourceName)
+		}
+		if payload.SourceType != "filesystem" {
+			t.Errorf("Expected SourceType 'filesystem', got '%s'", payload.SourceType)
+		}
+		close(done)
+	}
+
+	client := NewClient(server.URL, "test-token", nil, nil, nil, sbomHandler)
+
+	go client.Start()
+
+	select {
+	case <-done:
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for SBOM handler")
 	}
 }

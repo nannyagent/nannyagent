@@ -20,6 +20,7 @@ import (
 	"nannyagent/internal/proxmox"
 	"nannyagent/internal/realtime"
 	"nannyagent/internal/reboot"
+	"nannyagent/internal/sbom"
 	"nannyagent/internal/types"
 )
 
@@ -570,10 +571,24 @@ func main() {
 			}
 		}
 
+		// Define the handler for SBOM scan operations
+		sbomHandler := func(payload types.AgentSBOMPayload) {
+			logging.Info("Triggering SBOM scan %s (type: %s)...", payload.ScanID, payload.ScanType)
+
+			// Create SBOM manager
+			sbomManager := sbom.NewSBOMManager(cfg.APIBaseURL, authManager, agentID)
+
+			if err := sbomManager.HandleSBOMScan(payload); err != nil {
+				logging.Error("SBOM scan %s failed: %v", payload.ScanID, err)
+			} else {
+				logging.Info("SBOM scan %s completed successfully", payload.ScanID)
+			}
+		}
+
 		// Create and start the realtime client
 		// Use NANNYAPI_URL from env or default
 		pbURL := cfg.APIBaseURL
-		realtimeClient := realtime.NewClient(pbURL, accessToken, investigationHandler, patchHandler, rebootHandler)
+		realtimeClient := realtime.NewClient(pbURL, accessToken, investigationHandler, patchHandler, rebootHandler, sbomHandler)
 		realtimeClient.Start()
 	}()
 

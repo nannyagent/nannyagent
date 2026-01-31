@@ -39,16 +39,18 @@ type Client struct {
 	investigationHandler InvestigationHandler
 	patchHandler         PatchHandler
 	rebootHandler        types.RebootHandler
+	sbomHandler          types.SBOMHandler
 }
 
 // NewClient creates a new Realtime client
-func NewClient(baseURL, accessToken string, investigationHandler InvestigationHandler, patchHandler PatchHandler, rebootHandler types.RebootHandler) *Client {
+func NewClient(baseURL, accessToken string, investigationHandler InvestigationHandler, patchHandler PatchHandler, rebootHandler types.RebootHandler, sbomHandler types.SBOMHandler) *Client {
 	return &Client{
 		baseURL:              baseURL,
 		accessToken:          accessToken,
 		investigationHandler: investigationHandler,
 		patchHandler:         patchHandler,
 		rebootHandler:        rebootHandler,
+		sbomHandler:          sbomHandler,
 	}
 }
 
@@ -136,10 +138,10 @@ func (c *Client) Start() {
 		logging.Debug("Connected! Client ID: %s", clientId)
 
 		// --- STEP 2: Authorize & Subscribe ---
-		// This is where you tell PB: "I am this Agent, listen to 'investigations', 'patch_operations', and 'reboot_operations'"
+		// This is where you tell PB: "I am this Agent, listen to 'investigations', 'patch_operations', 'reboot_operations', and 'sbom_scans'"
 		subData, _ := json.Marshal(map[string]interface{}{
 			"clientId":      clientId,
-			"subscriptions": []string{"investigations", "patch_operations", "reboot_operations"},
+			"subscriptions": []string{"investigations", "patch_operations", "reboot_operations", "sbom_scans"},
 		})
 
 		req, _ := http.NewRequest("POST", c.baseURL+"/api/realtime", bytes.NewBuffer(subData))
@@ -156,7 +158,7 @@ func (c *Client) Start() {
 			time.Sleep(backoff)
 			continue
 		}
-		logging.Debug("Subscribed to 'investigations', 'patch_operations', and 'reboot_operations' successfully.")
+		logging.Debug("Subscribed to 'investigations', 'patch_operations', 'reboot_operations', and 'sbom_scans' successfully.")
 
 		// Reset consecutive failures on successful connection
 		consecutiveFailures = 0
@@ -192,6 +194,11 @@ func (c *Client) Start() {
 					// Check if this is a reboot operation
 					if msg.Action == "create" {
 						if c.handleRebootOperation(msg) {
+							continue
+						}
+
+						// Try to parse as SBOM scan
+						if c.handleSBOMScan(msg) {
 							continue
 						}
 
@@ -381,4 +388,68 @@ func parseVMID(v interface{}) (string, bool) {
 		// Try string conversion as fallback
 		return fmt.Sprintf("%v", v), true
 	}
+}
+
+// handleSBOMScan processes an SBOM scan message
+// Returns true if message was handled as an SBOM scan
+func (c *Client) handleSBOMScan(msg RealtimeMessage) bool {
+	record := msg.Record
+
+	// Check for SBOM scan indicators
+	scanID, hasID := record["id"].(string)
+	if !hasID {
+		return false
+	}
+
+	// Check for scan_type field (unique to SBOM scans)
+	scanType, hasScanType := record["scan_type"].(string)
+	if !hasScanType {
+		return false
+	}
+
+	// Check for status field with value "pending" (SBOM scans start with pending)
+	status, hasStatus := record["status"].(string)
+	if !hasStatus || status != "pending" {
+		return false
+	}
+
+	// This is an SBOM scan
+	payload := types.AgentSBOMPayload{
+		ScanID:   scanID,
+		ScanType: scanType,
+	}
+
+	// Extract source_name
+	if sourceName, ok := record["source_name"].(string); ok {
+		payload.SourceName = sourceName
+	}
+
+	// Extract source_type
+	if sourceType, ok := record["source_type"].(string); ok {
+		payload.SourceType = sourceType
+	}
+
+	// Extract optional LXC ID
+	if lxcID, ok := record["lxc_id"].(string); ok {
+		payload.LXCID = lxcID
+	}
+
+	// Extract optional VMID
+	if vmid, ok := parseVMID(record["vmid"]); ok {
+		payload.VMID = vmid
+	}
+
+	// Extract timestamp
+	if timestamp, ok := record["created"].(string); ok {
+		payload.Timestamp = timestamp
+	} else {
+		payload.Timestamp = time.Now().Format(time.RFC3339)
+	}
+
+	logging.Info("Received SBOM scan request: %s (type: %s)", scanID, scanType)
+
+	if c.sbomHandler != nil {
+		go c.sbomHandler(payload)
+	}
+	return true
 }

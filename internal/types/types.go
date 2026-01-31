@@ -611,3 +611,47 @@ type AgentRebootPayload struct {
 
 // RebootHandler is a callback function that processes a reboot operation request
 type RebootHandler func(payload AgentRebootPayload)
+
+// SBOM Management Types
+
+// SBOMScanStatus represents SBOM scan operation lifecycle
+type SBOMScanStatus string
+
+const (
+	SBOMScanStatusPending      SBOMScanStatus = "pending"
+	SBOMScanStatusAcknowledged SBOMScanStatus = "acknowledged"
+	SBOMScanStatusScanning     SBOMScanStatus = "scanning"
+	SBOMScanStatusCompleted    SBOMScanStatus = "completed"
+	SBOMScanStatusFailed       SBOMScanStatus = "failed"
+)
+
+// AgentSBOMPayload is sent to agent via realtime for SBOM scan execution
+type AgentSBOMPayload struct {
+	ScanID     string `json:"scan_id"`
+	ScanType   string `json:"scan_type"`   // host, container, image
+	SourceName string `json:"source_name"` // hostname, container name, or image name
+	SourceType string `json:"source_type"` // filesystem, podman, docker
+	LXCID      string `json:"lxc_id,omitempty"`
+	VMID       string `json:"vmid,omitempty"`
+	Timestamp  string `json:"timestamp"`
+}
+
+// SBOMHandler is a callback function that processes an SBOM scan request
+type SBOMHandler func(payload AgentSBOMPayload)
+
+// SBOMUploadResponse is the response from the SBOM upload API
+type SBOMUploadResponse struct {
+	ScanID     string         `json:"scan_id"`
+	Status     string         `json:"status"`
+	Message    string         `json:"message"`
+	VulnCounts SBOMVulnCounts `json:"vuln_counts"`
+}
+
+// SBOMVulnCounts holds vulnerability count breakdown
+type SBOMVulnCounts struct {
+	Critical int `json:"critical"`
+	High     int `json:"high"`
+	Medium   int `json:"medium"`
+	Low      int `json:"low"`
+	Total    int `json:"total"`
+}
