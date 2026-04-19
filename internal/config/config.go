@@ -152,7 +152,9 @@ func LoadConfig() (*Config, error) {
 }
 
 // ApplyDefaults fills in zero values with defaults for HTTPTransportConfig.
-// This allows users to specify only the settings they want to override.
+// This allows users to specify only the settings they want to override in YAML.
+// Convention: a zero value means "use default". To explicitly disable a timeout,
+// set it to -1 (which will be caught by ValidateHTTPTransport if not allowed).
 func (h *HTTPTransportConfig) ApplyDefaults() {
 	if h.MaxIdleConns == 0 {
 		h.MaxIdleConns = DefaultHTTPTransportConfig.MaxIdleConns
@@ -198,6 +200,39 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("missing required configuration: NANNYAPI_URL (for NannyAPI) must be set")
 	}
 
+	if err := c.HTTPTransport.Validate(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Validate checks that HTTPTransportConfig values are sensible and not internally inconsistent.
+func (h *HTTPTransportConfig) Validate() error {
+	if h.InitialRetryDelaySec <= 0 {
+		return fmt.Errorf("http_transport.initial_retry_delay_sec must be > 0 (got %d)", h.InitialRetryDelaySec)
+	}
+	if h.MaxRetryDelaySec <= 0 {
+		return fmt.Errorf("http_transport.max_retry_delay_sec must be > 0 (got %d)", h.MaxRetryDelaySec)
+	}
+	if h.MaxRetryDelaySec < h.InitialRetryDelaySec {
+		return fmt.Errorf("http_transport.max_retry_delay_sec (%d) must be >= initial_retry_delay_sec (%d)", h.MaxRetryDelaySec, h.InitialRetryDelaySec)
+	}
+	if h.TransportResetThreshold < 1 {
+		return fmt.Errorf("http_transport.transport_reset_threshold must be >= 1 (got %d)", h.TransportResetThreshold)
+	}
+	if h.IdleConnTimeoutSec < 0 {
+		return fmt.Errorf("http_transport.idle_conn_timeout_sec must be >= 0 (got %d)", h.IdleConnTimeoutSec)
+	}
+	if h.ResponseHeaderTimeoutSec < 0 {
+		return fmt.Errorf("http_transport.response_header_timeout_sec must be >= 0 (got %d)", h.ResponseHeaderTimeoutSec)
+	}
+	if h.MaxIdleConns < 0 {
+		return fmt.Errorf("http_transport.max_idle_conns must be >= 0 (got %d)", h.MaxIdleConns)
+	}
+	if h.MaxIdleConnsPerHost < 0 {
+		return fmt.Errorf("http_transport.max_idle_conns_per_host must be >= 0 (got %d)", h.MaxIdleConnsPerHost)
+	}
 	return nil
 }
 

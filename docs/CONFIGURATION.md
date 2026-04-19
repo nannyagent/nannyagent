@@ -249,9 +249,9 @@ Fine-tune HTTP connection behavior for reliability and error recovery. These set
 **Config structure:**
 ```yaml
 http_transport:
-  max_idle_conns: 100           # Max idle connections across all hosts
-  max_idle_conns_per_host: 10   # Max idle connections per host
-  idle_conn_timeout_sec: 90     # Seconds before idle connection is closed
+  max_idle_conns: 10            # Max idle connections across all hosts
+  max_idle_conns_per_host: 5    # Max idle connections per host
+  idle_conn_timeout_sec: 30     # Seconds before idle connection is closed
   response_header_timeout_sec: 30  # Seconds to wait for response headers
   disable_http2: false          # Disable HTTP/2 (use HTTP/1.1 only)
   transport_reset_threshold: 3  # Reset transport after N consecutive errors
@@ -262,10 +262,9 @@ http_transport:
 **Defaults:**
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `max_idle_conns` | 100 | Maximum idle connections to keep in pool |
-| `max_idle_conns_per_host` | 10 | Maximum idle connections per host |
-| `idle_conn_timeout_sec` | 90 | Timeout before closing idle connections |
-| `response_header_timeout_sec` | 30 | Timeout waiting for response headers |
+| `max_idle_conns` | 10 | Maximum idle connections to keep in pool |
+| `max_idle_conns_per_host` | 5 | Maximum idle connections per host |
+| `idle_conn_timeout_sec` | 30 | Timeout before closing idle connections |
 | `disable_http2` | false | When true, forces HTTP/1.1 only |
 | `transport_reset_threshold` | 3 | Number of consecutive connection errors before full transport reset |
 | `initial_retry_delay_sec` | 30 | Starting delay for exponential backoff |
@@ -285,8 +284,10 @@ The agent **never gives up** on connecting to the API:
    - Temporary failures (network issues): Retried with backoff
    - Permanent failures (refresh token expired): The agent clears the invalid token, logs a clear message requesting re-registration, and waits for the user to run `sudo nannyagent --register`
 
+**Note:** Omitting a setting (or setting it to `0`) applies the default value shown above.
+
 **When to Adjust:**
-- If experiencing frequent "response body closed" errors, try increasing `idle_conn_timeout_sec`
+- If experiencing frequent "response body closed" errors, try decreasing `idle_conn_timeout_sec` so it stays below the server/proxy idle timeout
 - If behind a corporate proxy with HTTP/2 issues, set `disable_http2: true`
 - For high-latency networks, increase `response_header_timeout_sec`
 - For faster recovery from API restarts, decrease `transport_reset_threshold`
