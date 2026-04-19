@@ -240,6 +240,57 @@ debug: true   # Debug logging enabled
 export DEBUG=true  # or DEBUG=1
 ```
 
+### Advanced Settings
+
+#### `http_transport` - HTTP Transport Configuration
+
+Fine-tune HTTP connection behavior for reliability and error recovery. These settings help the agent recover from transient connection issues, stale HTTP/2 connections, and API outages.
+
+**Config structure:**
+```yaml
+http_transport:
+  max_idle_conns: 100           # Max idle connections across all hosts
+  max_idle_conns_per_host: 10   # Max idle connections per host
+  idle_conn_timeout_sec: 90     # Seconds before idle connection is closed
+  response_header_timeout_sec: 30  # Seconds to wait for response headers
+  disable_http2: false          # Disable HTTP/2 (use HTTP/1.1 only)
+  transport_reset_threshold: 3  # Reset transport after N consecutive errors
+  initial_retry_delay_sec: 30   # Initial retry delay (exponential backoff)
+  max_retry_delay_sec: 1800     # Maximum retry delay (30 minutes)
+```
+
+**Defaults:**
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `max_idle_conns` | 100 | Maximum idle connections to keep in pool |
+| `max_idle_conns_per_host` | 10 | Maximum idle connections per host |
+| `idle_conn_timeout_sec` | 90 | Timeout before closing idle connections |
+| `response_header_timeout_sec` | 30 | Timeout waiting for response headers |
+| `disable_http2` | false | When true, forces HTTP/1.1 only |
+| `transport_reset_threshold` | 3 | Number of consecutive connection errors before full transport reset |
+| `initial_retry_delay_sec` | 30 | Starting delay for exponential backoff |
+| `max_retry_delay_sec` | 1800 | Maximum delay between retries (30 minutes) |
+
+**Important Behavior:**
+
+The agent **never gives up** on connecting to the API:
+
+1. **Connection Errors**: When HTTP/2 connections become stale (common after server restarts or Cloudflare timeouts), the agent uses exponential backoff and eventually resets the entire HTTP transport to create fresh connections.
+
+2. **API Outages**: If the API is unreachable, the agent retries indefinitely with exponential backoff up to the maximum delay.
+
+3. **Server Errors (5xx)**: Retried with exponential backoff - the agent waits for the API to recover.
+
+4. **Token Refresh Failures**: 
+   - Temporary failures (network issues): Retried with backoff
+   - Permanent failures (refresh token expired): The agent clears the invalid token, logs a clear message requesting re-registration, and waits for the user to run `sudo nannyagent --register`
+
+**When to Adjust:**
+- If experiencing frequent "response body closed" errors, try increasing `idle_conn_timeout_sec`
+- If behind a corporate proxy with HTTP/2 issues, set `disable_http2: true`
+- For high-latency networks, increase `response_header_timeout_sec`
+- For faster recovery from API restarts, decrease `transport_reset_threshold`
+
 ## Usage Examples
 
 ### Standard Configuration

@@ -2,13 +2,16 @@ package auth
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v3/host"
@@ -31,9 +34,221 @@ const (
 
 // AuthManager handles all NannyAPI authentication operations
 type AuthManager struct {
-	config  *config.Config
-	client  *http.Client
-	baseURL string // NannyAPI API URL
+	config    *config.Config
+	client    *http.Client
+	transport *http.Transport
+	mu        sync.RWMutex // Protects client, transport, and error counters
+	baseURL   string       // NannyAPI API URL
+
+	// Track consecutive connection errors to detect persistent connection issues.
+	// When threshold is reached, we completely rebuild the HTTP transport.
+	// This is a RECOVERY mechanism - the agent NEVER stops trying.
+	consecutiveConnErrors int
+
+	// Track retry attempts for exponential backoff.
+	// This allows us to increase delay between retries up to a maximum.
+	// The agent will NEVER give up - it just waits longer between attempts.
+	retryAttempts int
+}
+
+// isConnectionError checks if an error indicates a connection-level issue
+// that would benefit from a transport reset or exponential backoff.
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+
+	// HTTP/2 specific errors indicating stale multiplexed connections
+	if strings.Contains(errStr, "http2:") {
+		return true
+	}
+	// Response body issues (common with stale HTTP/2)
+	if strings.Contains(errStr, "response body closed") ||
+		strings.Contains(errStr, "read on closed") {
+		return true
+	}
+	// TCP-level connection problems
+	if strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "network is unreachable") ||
+		strings.Contains(errStr, "i/o timeout") {
+		return true
+	}
+	// TLS errors
+	if strings.Contains(errStr, "tls:") ||
+		strings.Contains(errStr, "certificate") {
+		return true
+	}
+	return false
+}
+
+// isRefreshTokenExpiredError checks if an error indicates the refresh token is
+// permanently invalid (expired, revoked, or invalid) and requires re-registration.
+// Returns true only for errors where retrying with the same token is pointless.
+func isRefreshTokenExpiredError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+
+	// API returned 400/401/403 with clear token invalidity messages
+	// Common patterns from OAuth APIs:
+	if strings.Contains(errStr, "refresh_token") && (strings.Contains(errStr, "expired") ||
+		strings.Contains(errStr, "invalid") ||
+		strings.Contains(errStr, "revoked")) {
+		return true
+	}
+	// Status code based detection
+	if strings.Contains(errStr, "status 401") || strings.Contains(errStr, "status 403") {
+		return true
+	}
+	// Generic invalid/expired token messages
+	if strings.Contains(errStr, "token") && (strings.Contains(errStr, "invalid") ||
+		strings.Contains(errStr, "expired") ||
+		strings.Contains(errStr, "revoked") ||
+		strings.Contains(errStr, "not found")) {
+		return true
+	}
+	return false
+}
+
+// calculateBackoff returns the current backoff duration using exponential backoff.
+// Uses config settings for initial delay and max delay.
+// The agent NEVER gives up - this just calculates how long to wait.
+func (am *AuthManager) calculateBackoff() time.Duration {
+	am.mu.RLock()
+	attempts := am.retryAttempts
+	tc := am.config.HTTPTransport
+	am.mu.RUnlock()
+
+	initialDelay := time.Duration(tc.InitialRetryDelaySec) * time.Second
+	maxDelay := time.Duration(tc.MaxRetryDelaySec) * time.Second
+
+	if attempts <= 0 {
+		return initialDelay
+	}
+
+	// Cap attempts to prevent overflow (2^30 is already huge)
+	if attempts > 30 {
+		return maxDelay
+	}
+
+	// Exponential backoff: initial * 2^attempts
+	// Cap at maxDelay
+	backoff := initialDelay * time.Duration(1<<uint(attempts))
+	if backoff > maxDelay || backoff <= 0 { // Check for overflow too
+		backoff = maxDelay
+	}
+	return backoff
+}
+
+// incrementRetryAttempts increases the retry counter for backoff calculation.
+func (am *AuthManager) incrementRetryAttempts() {
+	am.mu.Lock()
+	am.retryAttempts++
+	am.mu.Unlock()
+}
+
+// resetRetryAttempts clears the retry counter after successful request.
+func (am *AuthManager) resetRetryAttempts() {
+	am.mu.Lock()
+	am.retryAttempts = 0
+	am.mu.Unlock()
+}
+
+// createTransport builds an HTTP transport using config settings.
+// This is factored out to allow complete transport replacement on persistent errors.
+func createTransport(cfg *config.Config) *http.Transport {
+	tc := cfg.HTTPTransport
+
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+		TLSHandshakeTimeout: 10 * time.Second,
+
+		MaxIdleConns:          tc.MaxIdleConns,
+		MaxIdleConnsPerHost:   tc.MaxIdleConnsPerHost,
+		IdleConnTimeout:       time.Duration(tc.IdleConnTimeoutSec) * time.Second,
+		ResponseHeaderTimeout: time.Duration(tc.ResponseHeaderTimeoutSec) * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+
+		// ForceAttemptHTTP2 is the inverse of DisableHTTP2
+		ForceAttemptHTTP2: !tc.DisableHTTP2,
+	}
+
+	if tc.DisableHTTP2 {
+		// When HTTP/2 is disabled, we use HTTP/1.1's TLSNextProto trick
+		transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+		logging.Debug("HTTP/2 disabled, using HTTP/1.1 only")
+	}
+
+	return transport
+}
+
+// resetTransport completely replaces the HTTP transport and client.
+// This is a RECOVERY mechanism called when stale connections can't be fixed by
+// CloseIdleConnections(). The agent continues retrying - this just creates fresh connections.
+func (am *AuthManager) resetTransport() {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	logging.Info("Resetting HTTP transport to recover from stale connections (after %d consecutive errors)",
+		am.consecutiveConnErrors)
+
+	// Close existing connections
+	if am.transport != nil {
+		am.transport.CloseIdleConnections()
+	}
+
+	// Create completely new transport and client
+	am.transport = createTransport(am.config)
+	am.client = &http.Client{
+		Transport: am.transport,
+		Timeout:   5 * time.Minute,
+	}
+
+	// Reset error counter, but keep retry attempts for backoff
+	am.consecutiveConnErrors = 0
+}
+
+// recordConnError increments the error counter and resets transport if threshold reached.
+// Returns true if transport was reset.
+func (am *AuthManager) recordConnError() bool {
+	am.mu.Lock()
+	am.consecutiveConnErrors++
+	threshold := am.config.HTTPTransport.TransportResetThreshold
+	shouldReset := am.consecutiveConnErrors >= threshold
+	am.mu.Unlock()
+
+	if shouldReset {
+		am.resetTransport()
+		return true
+	}
+	return false
+}
+
+// clearConnErrors resets the error counter after a successful request.
+func (am *AuthManager) clearConnErrors() {
+	am.mu.Lock()
+	am.consecutiveConnErrors = 0
+	am.mu.Unlock()
+}
+
+// getClient returns the current HTTP client thread-safely.
+func (am *AuthManager) getClient() *http.Client {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return am.client
 }
 
 // NewAuthManager creates a new authentication manager
@@ -44,10 +259,14 @@ func NewAuthManager(cfg *config.Config) *AuthManager {
 		baseURL = os.Getenv("NANNYAPI_URL")
 	}
 
+	transport := createTransport(cfg)
+
 	return &AuthManager{
-		config:  cfg,
-		baseURL: baseURL,
+		config:    cfg,
+		baseURL:   baseURL,
+		transport: transport,
 		client: &http.Client{
+			Transport: transport,
 			// Increased default timeout for investigations/LLM responses
 			Timeout: 5 * time.Minute,
 		},
@@ -99,7 +318,7 @@ func (am *AuthManager) StartDeviceAuthorization() (*types.DeviceAuthResponse, er
 
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := am.client.Do(req)
+	resp, err := am.getClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start device authorization: %w", err)
 	}
@@ -146,7 +365,7 @@ func (am *AuthManager) AuthorizeDeviceCode(userCode string) error {
 
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := am.client.Do(req)
+	resp, err := am.getClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to authorize device code: %w", err)
 	}
@@ -202,7 +421,7 @@ func (am *AuthManager) PollForTokenAfterAuthorization(deviceCode string) (*types
 
 		req.Header.Set("Content-Type", "application/json")
 
-		resp, err := am.client.Do(req)
+		resp, err := am.getClient().Do(req)
 		if err != nil {
 			logging.Warning("Poll attempt %d failed: %v", attempts+1, err)
 			time.Sleep(PollInterval)
@@ -280,7 +499,7 @@ func (am *AuthManager) RegisterAgent(deviceCode string, hostname string, osType 
 
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := am.client.Do(req)
+	resp, err := am.getClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to register agent: %w", err)
 	}
@@ -334,7 +553,7 @@ func (am *AuthManager) RefreshAccessToken(refreshToken string) (*types.TokenResp
 
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := am.client.Do(req)
+	resp, err := am.getClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
@@ -547,14 +766,16 @@ func (am *AuthManager) GetCurrentAccessToken() (string, error) {
 }
 
 // AuthenticatedDo performs an HTTP request with automatic token injection,
-// retry logic (5 attempts, 60s delay), and token refreshing on 401.
+// infinite retry with exponential backoff, and token refreshing on 401.
+// The agent NEVER gives up on connection errors - it will keep retrying forever
+// with increasing delays (up to the configured maximum).
 func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers map[string]string) (*http.Response, error) {
-	var lastErr error
-
-	for attempt := 1; attempt <= 5; attempt++ {
+	// Infinite retry loop - agent NEVER gives up
+	for {
 		// Load token (raw, ignoring expiration check to allow refresh flow)
 		token, err := am.loadTokenRaw()
 		if err != nil {
+			// Token loading is a local error - no point retrying forever for this
 			return nil, fmt.Errorf("failed to load token: %w", err)
 		}
 
@@ -576,6 +797,15 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 				} else {
 					logging.Warning("Failed to save refreshed token: %v", err)
 				}
+			} else if isRefreshTokenExpiredError(err) {
+				// Refresh token is permanently invalid - clear it and notify
+				logging.Error("═══════════════════════════════════════════════════════════════════")
+				logging.Error("REFRESH TOKEN EXPIRED OR INVALID")
+				logging.Error("Re-registration is required: sudo nannyagent --register")
+				logging.Error("═══════════════════════════════════════════════════════════════════")
+				token.RefreshToken = ""
+				_ = am.SaveToken(token) // Clear the invalid refresh token
+				// Proceed with expired access token - will get 401 and wait for registration
 			} else {
 				logging.Warning("Pre-request refresh failed: %v. Proceeding with existing token...", err)
 			}
@@ -597,28 +827,86 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 
 		req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 
-		resp, err := am.client.Do(req)
+		client := am.getClient()
+		resp, err := client.Do(req)
 		if err != nil {
-			lastErr = err
-			logging.Debug("Request failed (attempt %d): %v. Resetting connection pool.", attempt, err)
-			am.client.CloseIdleConnections()
-			time.Sleep(60 * time.Second)
+			// Check if this is a connection-level error
+			if isConnectionError(err) {
+				// Track connection error and potentially reset transport
+				if am.recordConnError() {
+					logging.Info("Transport reset triggered by connection error: %v", err)
+				}
+
+				// Calculate backoff and wait
+				backoff := am.calculateBackoff()
+				am.incrementRetryAttempts()
+				logging.Warning("Connection error: %v. Retrying in %v (will never give up)", err, backoff)
+				time.Sleep(backoff)
+				continue
+			}
+
+			// Non-connection errors - also retry with backoff
+			backoff := am.calculateBackoff()
+			am.incrementRetryAttempts()
+			logging.Warning("Request error: %v. Retrying in %v", err, backoff)
+			client.CloseIdleConnections()
+			time.Sleep(backoff)
 			continue
 		}
+
+		// Successful request - clear all error tracking
+		am.clearConnErrors()
+		am.resetRetryAttempts()
 
 		if resp.StatusCode == http.StatusUnauthorized {
 			_ = resp.Body.Close()
 
 			if token.RefreshToken == "" {
-				return resp, nil
+				// No refresh token - need re-registration
+				// Log this loudly and wait for user to register
+				logging.Error("═══════════════════════════════════════════════════════════════════")
+				logging.Error("AUTHENTICATION REQUIRED: No refresh token available.")
+				logging.Error("Please run: sudo nannyagent --register")
+				logging.Error("═══════════════════════════════════════════════════════════════════")
+
+				backoff := am.calculateBackoff()
+				am.incrementRetryAttempts()
+				logging.Warning("Waiting %v before retrying (will keep trying after registration)...", backoff)
+				time.Sleep(backoff)
+				continue
 			}
 
 			// Try refresh
 			logging.Info("Token expired, refreshing...")
 			newTokenResp, err := am.RefreshAccessToken(token.RefreshToken)
 			if err != nil {
-				lastErr = fmt.Errorf("failed to refresh token: %w", err)
-				time.Sleep(60 * time.Second)
+				// Check if this is a permanent failure (refresh token expired/invalid)
+				if isRefreshTokenExpiredError(err) {
+					logging.Error("═══════════════════════════════════════════════════════════════════")
+					logging.Error("REFRESH TOKEN EXPIRED OR INVALID")
+					logging.Error("The refresh token has expired or been revoked.")
+					logging.Error("Re-registration is required: sudo nannyagent --register")
+					logging.Error("═══════════════════════════════════════════════════════════════════")
+
+					// Clear the invalid refresh token to avoid retrying with it
+					// Keep the agent_id in the token so re-registration can preserve it
+					token.RefreshToken = ""
+					if saveErr := am.SaveToken(token); saveErr != nil {
+						logging.Warning("Failed to clear invalid refresh token: %v", saveErr)
+					}
+
+					// Wait with max backoff - user needs to re-register
+					maxBackoff := time.Duration(am.config.HTTPTransport.MaxRetryDelaySec) * time.Second
+					logging.Warning("Waiting %v before retrying (will succeed after registration)...", maxBackoff)
+					time.Sleep(maxBackoff)
+					continue
+				}
+
+				// Temporary refresh failure - wait and retry
+				backoff := am.calculateBackoff()
+				am.incrementRetryAttempts()
+				logging.Warning("Token refresh failed: %v. Retrying in %v", err, backoff)
+				time.Sleep(backoff)
 				continue
 			}
 
@@ -631,42 +919,43 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 				AgentID:      token.AgentID,
 			}
 			if err := am.SaveToken(newToken); err != nil {
-				lastErr = fmt.Errorf("failed to save new token: %w", err)
-				time.Sleep(60 * time.Second)
-				continue
+				logging.Warning("Failed to save new token: %v", err)
 			}
 
-			// Retry immediately with new token
+			// Token refreshed - retry immediately
+			am.resetRetryAttempts()
 			continue
 		}
 
-		// If 5xx, sleep and retry
+		// If 5xx, the API is having issues - use exponential backoff
 		if resp.StatusCode >= 500 {
 			_ = resp.Body.Close()
-			lastErr = fmt.Errorf("server error: %d", resp.StatusCode)
-			time.Sleep(60 * time.Second)
+			backoff := am.calculateBackoff()
+			am.incrementRetryAttempts()
+			logging.Warning("Server error %d. Retrying in %v (will never give up)", resp.StatusCode, backoff)
+			time.Sleep(backoff)
 			continue
 		}
 
-		// Success or other error
+		// Success or client error (4xx except 401) - return response
 		return resp, nil
 	}
-
-	return nil, fmt.Errorf("request failed after 5 attempts: %v", lastErr)
 }
 
 // AuthenticatedRequest performs an authenticated request and returns the status code and response body.
-// It handles token refresh, localized retries, AND connection resets on failure.
+// It handles token refresh, retries, AND connection resets on failure.
+// When HTTP/2 connection errors persist (like "response body closed"), it triggers a full
+// transport reset to recover from stale connections.
+// The agent NEVER gives up - retry will continue indefinitely with exponential backoff.
 // usage: Prefer this over AuthenticatedDo when you need to read the full body string/JSON.
 func (am *AuthManager) AuthenticatedRequest(method, url string, body []byte, headers map[string]string) (int, []byte, error) {
-	var lastErr error
-	maxRetries := 3
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	// Infinite retry loop - agent NEVER gives up
+	for {
 		// Use AuthenticatedDo for the request (handles 401s, 500s, and transport errors during request)
+		// AuthenticatedDo itself never gives up, but if we get here there's a response to read
 		resp, err := am.AuthenticatedDo(method, url, body, headers)
 		if err != nil {
-			// AuthenticatedDo has its own retry logic, so if it fails, it's a hard fail
+			// AuthenticatedDo only returns errors for truly unrecoverable issues (like no token file)
 			return 0, nil, err
 		}
 
@@ -678,31 +967,35 @@ func (am *AuthManager) AuthenticatedRequest(method, url string, body []byte, hea
 		_ = resp.Body.Close()
 
 		if readErr == nil {
+			// Success - clear any error tracking
+			am.clearConnErrors()
+			am.resetRetryAttempts()
 			return statusCode, respBody, nil
 		}
 
-		// If read failed, the status code may be valid but the response is unusable.
-		// We discard the status code for this attempt since we are retrying.
+		// If read failed, the response is unusable.
+		// Check if it's a connection-level error
+		if isConnectionError(readErr) {
+			// Track connection error and potentially reset transport
+			if am.recordConnError() {
+				logging.Info("Transport reset triggered by response read error: %v", readErr)
+			}
 
-		// Handle read error (e.g. http2: response body closed)
-		lastErr = readErr
-		// Only log aggressive connection resets at Debug level unless it's the final attempt
-		if attempt < maxRetries {
-			logging.Debug("Failed to read response body (attempt %d/%d): %v. Resetting connection pool.", attempt, maxRetries, readErr)
-		} else {
-			logging.Warning("Failed to read response body (attempt %d/%d): %v. Connection pool reset failed to resolve issue.", attempt, maxRetries, readErr)
+			// Calculate backoff and wait - never give up
+			backoff := am.calculateBackoff()
+			am.incrementRetryAttempts()
+			logging.Warning("Response read error: %v. Retrying in %v (will never give up)", readErr, backoff)
+			time.Sleep(backoff)
+			continue
 		}
 
-		// Force close connections to clear bad state
-		am.client.CloseIdleConnections()
-
-		// Wait before retry
-		if attempt < maxRetries {
-			time.Sleep(5 * time.Second)
-		}
+		// Non-connection read error - also retry with backoff
+		backoff := am.calculateBackoff()
+		am.incrementRetryAttempts()
+		logging.Warning("Failed to read response body: %v. Retrying in %v", readErr, backoff)
+		am.getClient().CloseIdleConnections()
+		time.Sleep(backoff)
 	}
-
-	return 0, nil, fmt.Errorf("failed to read response after %d attempts: %w", maxRetries, lastErr)
 }
 
 // Helper functions
