@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -99,7 +100,8 @@ func TestLoadConfig_EnvFile(t *testing.T) {
 
 func TestValidate_Success(t *testing.T) {
 	config := &Config{
-		APIBaseURL: "https://test-api.nannyai.dev",
+		APIBaseURL:    "https://test-api.nannyai.dev",
+		HTTPTransport: DefaultHTTPTransportConfig,
 	}
 
 	err := config.Validate()
@@ -241,6 +243,112 @@ func TestLoadConfig_DebugEnvironmentVariations(t *testing.T) {
 
 			if config.Debug != tt.want {
 				t.Errorf("Debug = %v, want %v for env value %q", config.Debug, tt.want, tt.envValue)
+			}
+		})
+	}
+}
+
+func TestHTTPTransportConfig_Validate(t *testing.T) {
+	validBase := func() HTTPTransportConfig {
+		return DefaultHTTPTransportConfig
+	}
+
+	tests := []struct {
+		name    string
+		modify  func(*HTTPTransportConfig)
+		wantErr string
+	}{
+		{
+			name:    "valid defaults",
+			modify:  func(c *HTTPTransportConfig) {},
+			wantErr: "",
+		},
+		{
+			name:    "initial_retry_delay_sec zero",
+			modify:  func(c *HTTPTransportConfig) { c.InitialRetryDelaySec = 0 },
+			wantErr: "initial_retry_delay_sec must be > 0",
+		},
+		{
+			name:    "initial_retry_delay_sec negative",
+			modify:  func(c *HTTPTransportConfig) { c.InitialRetryDelaySec = -5 },
+			wantErr: "initial_retry_delay_sec must be > 0",
+		},
+		{
+			name:    "max_retry_delay_sec zero",
+			modify:  func(c *HTTPTransportConfig) { c.MaxRetryDelaySec = 0 },
+			wantErr: "max_retry_delay_sec must be > 0",
+		},
+		{
+			name:    "max_retry_delay_sec negative",
+			modify:  func(c *HTTPTransportConfig) { c.MaxRetryDelaySec = -10 },
+			wantErr: "max_retry_delay_sec must be > 0",
+		},
+		{
+			name: "max_retry_delay_sec less than initial",
+			modify: func(c *HTTPTransportConfig) {
+				c.InitialRetryDelaySec = 60
+				c.MaxRetryDelaySec = 30
+			},
+			wantErr: "max_retry_delay_sec (30) must be >= initial_retry_delay_sec (60)",
+		},
+		{
+			name:    "transport_reset_threshold zero",
+			modify:  func(c *HTTPTransportConfig) { c.TransportResetThreshold = 0 },
+			wantErr: "transport_reset_threshold must be >= 1",
+		},
+		{
+			name:    "transport_reset_threshold negative",
+			modify:  func(c *HTTPTransportConfig) { c.TransportResetThreshold = -1 },
+			wantErr: "transport_reset_threshold must be >= 1",
+		},
+		{
+			name:    "idle_conn_timeout_sec negative",
+			modify:  func(c *HTTPTransportConfig) { c.IdleConnTimeoutSec = -1 },
+			wantErr: "idle_conn_timeout_sec must be >= 0",
+		},
+		{
+			name:    "response_header_timeout_sec negative",
+			modify:  func(c *HTTPTransportConfig) { c.ResponseHeaderTimeoutSec = -1 },
+			wantErr: "response_header_timeout_sec must be >= 0",
+		},
+		{
+			name:    "max_idle_conns negative",
+			modify:  func(c *HTTPTransportConfig) { c.MaxIdleConns = -1 },
+			wantErr: "max_idle_conns must be >= 0",
+		},
+		{
+			name:    "max_idle_conns_per_host negative",
+			modify:  func(c *HTTPTransportConfig) { c.MaxIdleConnsPerHost = -1 },
+			wantErr: "max_idle_conns_per_host must be >= 0",
+		},
+		{
+			name:    "idle_conn_timeout_sec zero is valid",
+			modify:  func(c *HTTPTransportConfig) { c.IdleConnTimeoutSec = 0 },
+			wantErr: "",
+		},
+		{
+			name:    "response_header_timeout_sec zero is valid",
+			modify:  func(c *HTTPTransportConfig) { c.ResponseHeaderTimeoutSec = 0 },
+			wantErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validBase()
+			tt.modify(&cfg)
+			err := cfg.Validate()
+
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("Validate() unexpected error: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Errorf("Validate() expected error containing %q, got nil", tt.wantErr)
+				} else if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("Validate() error = %q, want it to contain %q", err.Error(), tt.wantErr)
+				}
 			}
 		})
 	}

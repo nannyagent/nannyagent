@@ -17,9 +17,23 @@ token_path: "/var/lib/nannyagent/token.json"
 # Node metrics collection interval in seconds (optional)
 # Default: 30
 metrics_interval: 30
+
 # Proxmox cluster/VM/LXC data collection interval in seconds (optional)
 # Default: 300
 
 # Debug mode (optional)
 # Default: false
 debug: false
+
+# HTTP Transport Configuration (optional, advanced)
+# These settings control HTTP connection behavior and error recovery.
+# The agent NEVER gives up - it retries indefinitely with exponential backoff.
+# http_transport:
+#   max_idle_conns: 10               # Max idle connections across all hosts (default: 10)
+#   max_idle_conns_per_host: 5       # Max idle connections per host (default: 5)
+#   idle_conn_timeout_sec: 30        # Seconds before idle connection closed (default: 30)
+#   response_header_timeout_sec: 30  # Seconds to wait for response headers
+#   disable_http2: false             # Set true if experiencing HTTP/2 issues
+#   transport_reset_threshold: 3     # Reset transport after N consecutive errors
+#   initial_retry_delay_sec: 30      # Initial retry delay (exponential backoff)
+#   max_retry_delay_sec: 1800        # Maximum retry delay (30 minutes)
