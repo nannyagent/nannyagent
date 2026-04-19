@@ -312,7 +312,7 @@ func (sm *SBOMManager) uploadSBOM(payload types.AgentSBOMPayload, sbomPath strin
 		return fmt.Errorf("failed to close multipart writer: %w", err)
 	}
 
-	// Upload to API (single attempt, no retries)
+	// Upload to API - scan_id is included in the form payload to update existing record
 	url := fmt.Sprintf("%s/api/sbom/upload", sm.baseURL)
 	headers := map[string]string{
 		"Content-Type": writer.FormDataContentType(),
@@ -352,12 +352,15 @@ func (sm *SBOMManager) reportFailure(scanID string, errMsg string) error {
 	url := fmt.Sprintf("%s/api/sbom/scans/%s/status", sm.baseURL, scanID)
 
 	payload := map[string]interface{}{
-		"status":    "failed",
-		"error_msg": errMsg,
+		"status":        "failed",
+		"error_message": errMsg,
 	}
 	jsonData, _ := json.Marshal(payload)
 
-	resp, err := sm.authManager.AuthenticatedDoOnce("POST", url, jsonData, nil)
+	headers := map[string]string{
+		"Content-Type": "application/json",
+	}
+	resp, err := sm.authManager.AuthenticatedDoOnce("PATCH", url, jsonData, headers)
 	if err != nil {
 		logging.Warning("Failed to report scan failure: %v", err)
 		return fmt.Errorf("scan failed: %s (also failed to report: %w)", errMsg, err)

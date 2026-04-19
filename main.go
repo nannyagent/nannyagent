@@ -573,16 +573,9 @@ func main() {
 
 		// Define the handler for SBOM scan operations
 		sbomHandler := func(payload types.AgentSBOMPayload) {
-			logging.Info("Triggering SBOM scan %s (type: %s)...", payload.ScanID, payload.ScanType)
-
-			// Create SBOM manager
+			// Create SBOM manager and handle scan (manager handles all logging)
 			sbomManager := sbom.NewSBOMManager(cfg.APIBaseURL, authManager, agentID)
-
-			if err := sbomManager.HandleSBOMScan(payload); err != nil {
-				logging.Error("SBOM scan %s failed: %v", payload.ScanID, err)
-			} else {
-				logging.Info("SBOM scan %s completed successfully", payload.ScanID)
-			}
+			_ = sbomManager.HandleSBOMScan(payload)
 		}
 
 		// Create and start the realtime client
