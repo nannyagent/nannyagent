@@ -38,6 +38,7 @@ type AuthManager struct {
 	client    *http.Client
 	transport *http.Transport
 	mu        sync.RWMutex // Protects client, transport, and error counters
+	tokenMu   sync.Mutex   // Protects token file reads and writes
 	baseURL   string       // NannyAPI API URL
 
 	// Track consecutive connection errors to detect persistent connection issues.
@@ -605,7 +606,7 @@ func (am *AuthManager) RenewRefreshToken(refreshToken string) (*types.TokenRespo
 
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := am.client.Do(req)
+	resp, err := am.getClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to renew refresh token: %w", err)
 	}
@@ -639,6 +640,9 @@ func (am *AuthManager) RenewRefreshToken(refreshToken string) (*types.TokenRespo
 
 // SaveToken saves the authentication token to secure local storage
 func (am *AuthManager) SaveToken(token *types.AuthToken) error {
+	am.tokenMu.Lock()
+	defer am.tokenMu.Unlock()
+
 	if err := am.EnsureTokenStorageDir(); err != nil {
 		return fmt.Errorf("failed to ensure token storage directory: %w", err)
 	}
@@ -684,6 +688,9 @@ func (am *AuthManager) LoadToken() (*types.AuthToken, error) {
 
 // loadTokenRaw loads the token from file without checking expiration
 func (am *AuthManager) loadTokenRaw() (*types.AuthToken, error) {
+	am.tokenMu.Lock()
+	defer am.tokenMu.Unlock()
+
 	tokenPath := am.getTokenPath()
 
 	data, err := os.ReadFile(tokenPath)
@@ -1021,6 +1028,10 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 // token refreshing on 401, but NO retry logic for server errors (5xx).
 // Use this for operations where retrying is not desired (e.g., large file uploads).
 func (am *AuthManager) AuthenticatedDoOnce(method, url string, body []byte, headers map[string]string) (*http.Response, error) {
+	if headers == nil {
+		headers = make(map[string]string)
+	}
+
 	// Load token (raw, ignoring expiration check to allow refresh flow)
 	token, err := am.loadTokenRaw()
 	if err != nil {
@@ -1070,7 +1081,7 @@ func (am *AuthManager) AuthenticatedDoOnce(method, url string, body []byte, head
 
 	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 
-	resp, err := am.client.Do(req)
+	resp, err := am.getClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -1115,7 +1126,7 @@ func (am *AuthManager) AuthenticatedDoOnce(method, url string, body []byte, head
 		}
 		req.Header.Set("Authorization", "Bearer "+newToken.AccessToken)
 
-		resp, err = am.client.Do(req)
+		resp, err = am.getClient().Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("request failed after token refresh: %w", err)
 		}

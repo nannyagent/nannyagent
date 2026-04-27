@@ -658,7 +658,7 @@ func main() {
 				refreshResp.RefreshTokenExpiresIn, cfg.TokenRenewalThresholdDays)
 			renewResp, err := authManager.RenewRefreshToken(token.RefreshToken)
 			if err != nil {
-				logging.Warning("Refresh token renewal failed: %v (will retry in 1 hour)", err)
+				logging.Warning("Refresh token renewal failed: %v (will retry in %s)", err, retryInterval)
 				nextCheck = time.Now().Add(retryInterval)
 				continue
 			}
@@ -671,7 +671,7 @@ func main() {
 				AgentID:      token.AgentID,
 			}
 			if err := authManager.SaveToken(newToken); err != nil {
-				logging.Warning("Failed to save renewed token: %v (will retry in 1 hour)", err)
+				logging.Warning("Failed to save renewed token: %v (will retry in %s)", err, retryInterval)
 				nextCheck = time.Now().Add(retryInterval)
 				continue
 			}
