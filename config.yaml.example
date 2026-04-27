@@ -20,6 +20,31 @@ metrics_interval: 30
 
 # Proxmox cluster/VM/LXC data collection interval in seconds (optional)
 # Default: 300
+proxmox_interval: 300
+
+# ─── Refresh token renewal settings ─────────────────────────────────────────
+#
+# The refresh token has a 30-day lifetime. The agent automatically renews it
+# before it expires so that you never have to manually re-register the agent.
+#
+# How it works:
+#   1. Every `token_renewal_check_interval_secs` seconds the agent refreshes the
+#      access token and reads `refresh_token_expires_in` from the API response.
+#   2. If fewer than `token_renewal_threshold_days` days remain on the refresh
+#      token, the agent calls `renew-refresh-token` to rotate it.
+#   3. If that call fails (API unreachable etc.), the next attempt is scheduled
+#      in `token_renewal_retry_interval_secs` seconds.  The agent never crashes.
+#
+# For testing you can use short intervals, e.g. 60 (1 minute).
+
+# Days before refresh-token expiry at which renewal starts (default: 7)
+token_renewal_threshold_days: 7
+
+# Normal check cadence in seconds (default: 21600 = 6 hours)
+token_renewal_check_interval_secs: 21600
+
+# Retry interval in seconds when a renewal attempt fails (default: 3600 = 1 hour)
+token_renewal_retry_interval_secs: 3600
 
 # Debug mode (optional)
 # Default: false

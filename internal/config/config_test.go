@@ -100,8 +100,11 @@ func TestLoadConfig_EnvFile(t *testing.T) {
 
 func TestValidate_Success(t *testing.T) {
 	config := &Config{
-		APIBaseURL:    "https://test-api.nannyai.dev",
-		HTTPTransport: DefaultHTTPTransportConfig,
+		APIBaseURL:                    "https://test-api.nannyai.dev",
+		HTTPTransport:                 DefaultHTTPTransportConfig,
+		TokenRenewalThresholdDays:     DefaultConfig.TokenRenewalThresholdDays,
+		TokenRenewalCheckIntervalSecs: DefaultConfig.TokenRenewalCheckIntervalSecs,
+		TokenRenewalRetryIntervalSecs: DefaultConfig.TokenRenewalRetryIntervalSecs,
 	}
 
 	err := config.Validate()

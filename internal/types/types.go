@@ -178,13 +178,14 @@ type RegisterRequest struct {
 
 // TokenResponse represents the token response (compatible with both old and new)
 type TokenResponse struct {
-	AccessToken      string `json:"access_token"`
-	RefreshToken     string `json:"refresh_token"`
-	TokenType        string `json:"token_type"`
-	ExpiresIn        int    `json:"expires_in"`
-	AgentID          string `json:"agent_id,omitempty"`
-	Error            string `json:"error,omitempty"`
-	ErrorDescription string `json:"error_description,omitempty"`
+	AccessToken           string `json:"access_token"`
+	RefreshToken          string `json:"refresh_token"`
+	TokenType             string `json:"token_type"`
+	ExpiresIn             int    `json:"expires_in"`
+	RefreshTokenExpiresIn int    `json:"refresh_token_expires_in,omitempty"`
+	AgentID               string `json:"agent_id,omitempty"`
+	Error                 string `json:"error,omitempty"`
+	ErrorDescription      string `json:"error_description,omitempty"`
 }
 
 // TokenRequest represents the token request for device flow

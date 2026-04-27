@@ -38,6 +38,7 @@ type AuthManager struct {
 	client    *http.Client
 	transport *http.Transport
 	mu        sync.RWMutex // Protects client, transport, and error counters
+	tokenMu   sync.Mutex   // Protects token file reads and writes
 	baseURL   string       // NannyAPI API URL
 
 	// Track consecutive connection errors to detect persistent connection issues.
@@ -581,8 +582,67 @@ func (am *AuthManager) RefreshAccessToken(refreshToken string) (*types.TokenResp
 	return &tokenResp, nil
 }
 
+// RenewRefreshToken rotates the refresh token. The previous refresh token is
+// invalidated and a new one (plus a new access token) is returned.
+// This should be called when refresh_token_expires_in is below 7 days.
+func (am *AuthManager) RenewRefreshToken(refreshToken string) (*types.TokenResponse, error) {
+	logging.Info("Renewing refresh token...")
+
+	payload := map[string]string{
+		"action":        "renew-refresh-token",
+		"refresh_token": refreshToken,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal renew-refresh-token request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/agent", am.baseURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create renew-refresh-token request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := am.getClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to renew refresh token: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read renew-refresh-token response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("renew-refresh-token failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tokenResp types.TokenResponse
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to parse renew-refresh-token response: %w", err)
+	}
+
+	if tokenResp.Error != "" {
+		return nil, fmt.Errorf("renew-refresh-token failed: %s", tokenResp.ErrorDescription)
+	}
+
+	if tokenResp.RefreshToken == "" {
+		return nil, fmt.Errorf("renew-refresh-token response missing new refresh token")
+	}
+
+	logging.Info("Refresh token renewed successfully")
+	return &tokenResp, nil
+}
+
 // SaveToken saves the authentication token to secure local storage
 func (am *AuthManager) SaveToken(token *types.AuthToken) error {
+	am.tokenMu.Lock()
+	defer am.tokenMu.Unlock()
+
 	if err := am.EnsureTokenStorageDir(); err != nil {
 		return fmt.Errorf("failed to ensure token storage directory: %w", err)
 	}
@@ -628,6 +688,9 @@ func (am *AuthManager) LoadToken() (*types.AuthToken, error) {
 
 // loadTokenRaw loads the token from file without checking expiration
 func (am *AuthManager) loadTokenRaw() (*types.AuthToken, error) {
+	am.tokenMu.Lock()
+	defer am.tokenMu.Unlock()
+
 	tokenPath := am.getTokenPath()
 
 	data, err := os.ReadFile(tokenPath)
@@ -641,6 +704,11 @@ func (am *AuthManager) loadTokenRaw() (*types.AuthToken, error) {
 	}
 
 	return &token, nil
+}
+
+// LoadTokenRaw is the exported version of loadTokenRaw for use outside the package.
+func (am *AuthManager) LoadTokenRaw() (*types.AuthToken, error) {
+	return am.loadTokenRaw()
 }
 
 // IsTokenExpired checks if a token needs refresh
@@ -682,15 +750,10 @@ func (am *AuthManager) EnsureAuthenticated() (*types.AuthToken, error) {
 
 			newToken := &types.AuthToken{
 				AccessToken:  refreshResp.AccessToken,
-				RefreshToken: refreshToken,
+				RefreshToken: refreshToken, // preserve existing refresh token (API doesn't rotate it on refresh)
 				TokenType:    refreshResp.TokenType,
 				ExpiresAt:    time.Now().Add(time.Duration(refreshResp.ExpiresIn) * time.Second),
 				AgentID:      agentID,
-			}
-
-			// Update refresh token if a new one was provided
-			if refreshResp.RefreshToken != "" {
-				newToken.RefreshToken = refreshResp.RefreshToken
 			}
 
 			if saveErr := am.SaveToken(newToken); saveErr == nil {
@@ -700,6 +763,17 @@ func (am *AuthManager) EnsureAuthenticated() (*types.AuthToken, error) {
 	}
 
 	return nil, fmt.Errorf("no valid token available and refresh failed - registration required")
+}
+
+// NeedsRefreshTokenRenewal returns true when the refresh token has fewer than
+// thresholdDays days of lifetime left, based on the refresh_token_expires_in
+// value returned by the last /api/agent refresh call.
+func NeedsRefreshTokenRenewal(refreshTokenExpiresIn int, thresholdDays int) bool {
+	if refreshTokenExpiresIn <= 0 {
+		return false
+	}
+	thresholdSeconds := thresholdDays * 24 * 60 * 60
+	return refreshTokenExpiresIn < thresholdSeconds
 }
 
 // CompleteDeviceAuthFlow runs the full device authorization flow
@@ -755,11 +829,11 @@ func (am *AuthManager) GetCurrentAgentID() (string, error) {
 	return token.AgentID, nil
 }
 
-// GetCurrentAccessToken retrieves the current access token
+// GetCurrentAccessToken retrieves a valid access token, refreshing if needed
 func (am *AuthManager) GetCurrentAccessToken() (string, error) {
-	token, err := am.LoadToken()
+	token, err := am.EnsureAuthenticated()
 	if err != nil {
-		return "", fmt.Errorf("failed to load token: %w", err)
+		return "", fmt.Errorf("failed to ensure authentication: %w", err)
 	}
 
 	return token.AccessToken, nil
@@ -784,10 +858,14 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 			logging.Info("Token expired locally, attempting refresh before request...")
 			newTokenResp, err := am.RefreshAccessToken(token.RefreshToken)
 			if err == nil {
-				// Save new token
+				// Preserve existing refresh token if the API didn't return a new one
+				newRefreshToken := token.RefreshToken
+				if newTokenResp.RefreshToken != "" {
+					newRefreshToken = newTokenResp.RefreshToken
+				}
 				newToken := &types.AuthToken{
 					AccessToken:  newTokenResp.AccessToken,
-					RefreshToken: newTokenResp.RefreshToken,
+					RefreshToken: newRefreshToken,
 					TokenType:    newTokenResp.TokenType,
 					ExpiresAt:    time.Now().Add(time.Duration(newTokenResp.ExpiresIn) * time.Second),
 					AgentID:      token.AgentID,
@@ -910,10 +988,14 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 				continue
 			}
 
-			// Save new token
+			// Preserve existing refresh token if the API didn't return a new one
+			newRefreshToken := token.RefreshToken
+			if newTokenResp.RefreshToken != "" {
+				newRefreshToken = newTokenResp.RefreshToken
+			}
 			newToken := &types.AuthToken{
 				AccessToken:  newTokenResp.AccessToken,
-				RefreshToken: newTokenResp.RefreshToken,
+				RefreshToken: newRefreshToken,
 				TokenType:    newTokenResp.TokenType,
 				ExpiresAt:    time.Now().Add(time.Duration(newTokenResp.ExpiresIn) * time.Second),
 				AgentID:      token.AgentID,
@@ -940,6 +1022,117 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 		// Success or client error (4xx except 401) - return response
 		return resp, nil
 	}
+}
+
+// AuthenticatedDoOnce performs an HTTP request with automatic token injection and
+// token refreshing on 401, but NO retry logic for server errors (5xx).
+// Use this for operations where retrying is not desired (e.g., large file uploads).
+func (am *AuthManager) AuthenticatedDoOnce(method, url string, body []byte, headers map[string]string) (*http.Response, error) {
+	if headers == nil {
+		headers = make(map[string]string)
+	}
+
+	// Load token (raw, ignoring expiration check to allow refresh flow)
+	token, err := am.loadTokenRaw()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load token: %w", err)
+	}
+
+	// Check if token is expired locally and try to refresh proactively
+	if am.IsTokenExpired(token) && token.RefreshToken != "" {
+		logging.Info("Token expired locally, attempting refresh before request...")
+		newTokenResp, err := am.RefreshAccessToken(token.RefreshToken)
+		if err == nil {
+			// Preserve existing refresh token if the API didn't return a new one
+			newRefreshToken := token.RefreshToken
+			if newTokenResp.RefreshToken != "" {
+				newRefreshToken = newTokenResp.RefreshToken
+			}
+			newToken := &types.AuthToken{
+				AccessToken:  newTokenResp.AccessToken,
+				RefreshToken: newRefreshToken,
+				TokenType:    newTokenResp.TokenType,
+				ExpiresAt:    time.Now().Add(time.Duration(newTokenResp.ExpiresIn) * time.Second),
+				AgentID:      token.AgentID,
+			}
+			if err := am.SaveToken(newToken); err == nil {
+				token = newToken // Use new token for this request
+			} else {
+				logging.Warning("Failed to save refreshed token: %v", err)
+			}
+		} else {
+			logging.Warning("Pre-request refresh failed: %v. Proceeding with existing token...", err)
+		}
+	}
+
+	req, err := http.NewRequest(method, url, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set default content type if not provided
+	if _, ok := headers["Content-Type"]; !ok {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+
+	resp, err := am.getClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	// Handle 401 by trying to refresh token once
+	if resp.StatusCode == http.StatusUnauthorized && token.RefreshToken != "" {
+		_ = resp.Body.Close()
+
+		logging.Info("Token expired, refreshing...")
+		newTokenResp, err := am.RefreshAccessToken(token.RefreshToken)
+		if err != nil {
+			return nil, fmt.Errorf("failed to refresh token: %w", err)
+		}
+
+		// Preserve existing refresh token if the API didn't return a new one
+		newRefreshToken := token.RefreshToken
+		if newTokenResp.RefreshToken != "" {
+			newRefreshToken = newTokenResp.RefreshToken
+		}
+		newToken := &types.AuthToken{
+			AccessToken:  newTokenResp.AccessToken,
+			RefreshToken: newRefreshToken,
+			TokenType:    newTokenResp.TokenType,
+			ExpiresAt:    time.Now().Add(time.Duration(newTokenResp.ExpiresIn) * time.Second),
+			AgentID:      token.AgentID,
+		}
+		if err := am.SaveToken(newToken); err != nil {
+			return nil, fmt.Errorf("failed to save new token: %w", err)
+		}
+
+		// Retry once with new token
+		req, err = http.NewRequest(method, url, bytes.NewBuffer(body))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		if _, ok := headers["Content-Type"]; !ok {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		req.Header.Set("Authorization", "Bearer "+newToken.AccessToken)
+
+		resp, err = am.getClient().Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("request failed after token refresh: %w", err)
+		}
+	}
+
+	return resp, nil
 }
 
 // AuthenticatedRequest performs an authenticated request and returns the status code and response body.
