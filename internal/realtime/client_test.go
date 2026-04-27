@@ -10,6 +10,13 @@ import (
 	"nannyagent/internal/types"
 )
 
+// staticTokenProvider is a test double that always returns the same token.
+type staticTokenProvider struct{ token string }
+
+func (s *staticTokenProvider) GetCurrentAccessToken() (string, error) { return s.token, nil }
+
+func mockToken(t string) TokenProvider { return &staticTokenProvider{token: t} }
+
 func TestClient_Start(t *testing.T) {
 	// Create a mock SSE server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +66,7 @@ func TestClient_Start(t *testing.T) {
 		close(done)
 	}
 
-	client := NewClient(server.URL, "test-token", handler, nil, nil)
+	client := NewClient(server.URL, mockToken("test-token"), handler, nil, nil)
 
 	// Run Start in a goroutine
 	go client.Start()
@@ -183,7 +190,7 @@ func TestClient_RebootHandler(t *testing.T) {
 		close(done)
 	}
 
-	client := NewClient(server.URL, "test-token", nil, nil, rebootHandler)
+	client := NewClient(server.URL, mockToken("test-token"), nil, nil, rebootHandler)
 
 	go client.Start()
 
@@ -239,7 +246,7 @@ func TestClient_PatchHandler(t *testing.T) {
 		close(done)
 	}
 
-	client := NewClient(server.URL, "test-token", nil, patchHandler, nil)
+	client := NewClient(server.URL, mockToken("test-token"), nil, patchHandler, nil)
 
 	go client.Start()
 

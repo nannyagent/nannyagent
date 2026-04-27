@@ -299,11 +299,11 @@ func (tm *BCCTraceManager) generateBpftraceScript(spec TraceSpec) (string, error
 
 	// Add BEGIN block
 	script.WriteString("BEGIN {\n")
-	script.WriteString(fmt.Sprintf("  printf(\"Starting trace for %s...\\n\");\n", spec.Target))
+	fmt.Fprintf(&script, "  printf(\"Starting trace for %s...\\n\");\n", spec.Target)
 	script.WriteString("}\n\n")
 
 	// Build the main probe
-	script.WriteString(fmt.Sprintf("%s {\n", probe))
+	fmt.Fprintf(&script, "%s {\n", probe)
 
 	// Add filters if specified
 	if tm.needsFiltering(spec) {
@@ -315,7 +315,7 @@ func (tm *BCCTraceManager) generateBpftraceScript(spec TraceSpec) (string, error
 
 	// Build output format
 	outputFormat := tm.buildOutputFormat(spec)
-	script.WriteString(fmt.Sprintf("    printf(\"%s\\n\"", outputFormat))
+	fmt.Fprintf(&script, "    printf(\"%s\\n\"", outputFormat)
 
 	// Add arguments
 	args := tm.buildArgumentList(spec)
@@ -335,7 +335,7 @@ func (tm *BCCTraceManager) generateBpftraceScript(spec TraceSpec) (string, error
 
 	// Add END block
 	script.WriteString("END {\n")
-	script.WriteString(fmt.Sprintf("  printf(\"Trace completed for %s\\n\");\n", spec.Target))
+	fmt.Fprintf(&script, "  printf(\"Trace completed for %s\\n\");\n", spec.Target)
 	script.WriteString("}\n")
 
 	return script.String(), nil

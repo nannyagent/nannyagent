@@ -32,20 +32,25 @@ type InvestigationHandler func(investigationID, prompt string)
 // PatchHandler is a callback function that processes a patch operation request
 type PatchHandler func(payload types.AgentPatchPayload)
 
+// TokenProvider is an interface for fetching a fresh access token
+type TokenProvider interface {
+	GetCurrentAccessToken() (string, error)
+}
+
 // Client handles the Realtime (SSE) connection to NannyAPI
 type Client struct {
 	baseURL              string
-	accessToken          string
+	tokenProvider        TokenProvider
 	investigationHandler InvestigationHandler
 	patchHandler         PatchHandler
 	rebootHandler        types.RebootHandler
 }
 
 // NewClient creates a new Realtime client
-func NewClient(baseURL, accessToken string, investigationHandler InvestigationHandler, patchHandler PatchHandler, rebootHandler types.RebootHandler) *Client {
+func NewClient(baseURL string, tokenProvider TokenProvider, investigationHandler InvestigationHandler, patchHandler PatchHandler, rebootHandler types.RebootHandler) *Client {
 	return &Client{
 		baseURL:              baseURL,
-		accessToken:          accessToken,
+		tokenProvider:        tokenProvider,
 		investigationHandler: investigationHandler,
 		patchHandler:         patchHandler,
 		rebootHandler:        rebootHandler,
@@ -78,6 +83,16 @@ func (c *Client) Start() {
 
 	// Retry loop for SSE connection - no maximum retries, will keep trying forever
 	for {
+		// Fetch a fresh access token on every connection attempt
+		accessToken, err := c.tokenProvider.GetCurrentAccessToken()
+		if err != nil {
+			consecutiveFailures++
+			backoff := CalculateBackoff(consecutiveFailures)
+			logging.Warning("Failed to get access token (attempt %d): %v, retrying in %v", consecutiveFailures, err, backoff)
+			time.Sleep(backoff)
+			continue
+		}
+
 		// IMPORTANT: SSE requires a client that doesn't buffer and doesn't timeout
 		customClient := &http.Client{
 			Transport: &http.Transport{
@@ -143,7 +158,7 @@ func (c *Client) Start() {
 		})
 
 		req, _ := http.NewRequest("POST", c.baseURL+"/api/realtime", bytes.NewBuffer(subData))
-		req.Header.Set("Authorization", "Bearer "+c.accessToken)
+		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("Content-Type", "application/json")
 
 		subResp, err := http.DefaultClient.Do(req)

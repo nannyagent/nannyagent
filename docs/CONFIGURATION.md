@@ -62,6 +62,15 @@ metrics_interval: 30
 # Optional: Proxmox data collection interval in seconds (default: 300)
 proxmox_interval: 300
 
+# Optional: Refresh token renewal threshold in days (default: 7)
+token_renewal_threshold_days: 7
+
+# Optional: How often (secs) to check if renewal is needed (default: 21600 = 6h)
+token_renewal_check_interval_secs: 21600
+
+# Optional: How often (secs) to retry a failed renewal (default: 3600 = 1h)
+token_renewal_retry_interval_secs: 3600
+
 # Optional: Enable debug logging (default: false)
 debug: false
 ```
@@ -223,6 +232,64 @@ proxmox_interval: 1800  # Every 30 minutes
 
 **Note:** No environment variable override available for this setting.
 
+#### `token_renewal_threshold_days`
+
+How many days before the refresh token expires that the agent should proactively renew it.
+
+The agent periodically calls the API to check the remaining lifetime of the refresh token.
+When fewer than this many days remain, it triggers a `renew-refresh-token` request, which
+rotates the refresh token and issues a new access token.
+
+**Default:** `7` (start renewing when fewer than 7 days remain)
+
+**Examples:**
+```yaml
+token_renewal_threshold_days: 7   # Default — renew in the last week
+token_renewal_threshold_days: 14  # More aggressive — renew in the last 2 weeks
+token_renewal_threshold_days: 3   # Conservative — renew only in the last 3 days
+```
+
+#### `token_renewal_check_interval_secs`
+
+How often (in **seconds**) the background renewal goroutine checks whether the refresh
+token is within the renewal threshold window. Using seconds makes it easy to test with
+short intervals (e.g. `60` for a 1-minute check cycle).
+
+**Default:** `21600` (6 hours)
+
+**Examples:**
+```yaml
+token_renewal_check_interval_secs: 21600  # Default — 6 hours
+token_renewal_check_interval_secs: 43200  # Less frequent — 12 hours
+token_renewal_check_interval_secs: 60     # 1 minute (useful for testing)
+```
+
+#### `token_renewal_retry_interval_secs`
+
+If a renewal attempt fails (e.g., the API is temporarily unreachable), the agent will
+retry after this many **seconds**. Retries continue until the renewal succeeds. The agent
+**never crashes or requires a restart** on renewal failure — it just logs a warning
+and retries.
+
+**Default:** `3600` (1 hour)
+
+**Examples:**
+```yaml
+token_renewal_retry_interval_secs: 3600  # Default — retry every hour
+token_renewal_retry_interval_secs: 7200  # Retry every 2 hours
+token_renewal_retry_interval_secs: 30    # 30 seconds (useful for testing)
+```
+
+**How the three settings work together:**
+
+1. Every `token_renewal_check_interval_secs` seconds the agent refreshes the access token
+   and checks `refresh_token_expires_in` from the API response.
+2. If `refresh_token_expires_in < token_renewal_threshold_days * 86400` seconds, the
+   agent calls `renew-refresh-token` to rotate the refresh token.
+3. If that call fails, the next check is scheduled in `token_renewal_retry_interval_secs`
+   seconds instead of the normal interval.
+4. Once renewal succeeds, the agent returns to the normal check interval.
+
 #### `debug` / `DEBUG`
 
 Enable debug-level logging for troubleshooting.
@@ -303,6 +370,9 @@ portal_url: https://nannyai.dev
 token_path: /var/lib/nannyagent/token.json
 metrics_interval: 30
 proxmox_interval: 300
+token_renewal_threshold_days: 7
+token_renewal_check_interval_secs: 21600
+token_renewal_retry_interval_secs: 3600
 debug: false
 ```
 

@@ -519,12 +519,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	accessToken, err := authManager.GetCurrentAccessToken()
-	if err != nil {
-		logging.Error("Failed to get current access token: %v", err)
-		os.Exit(1)
-	}
-
 	// Start SSE connection in a separate goroutine
 	go func() {
 		// Define the handler for investigations
@@ -573,7 +567,7 @@ func main() {
 		// Create and start the realtime client
 		// Use NANNYAPI_URL from env or default
 		pbURL := cfg.APIBaseURL
-		realtimeClient := realtime.NewClient(pbURL, accessToken, investigationHandler, patchHandler, rebootHandler)
+		realtimeClient := realtime.NewClient(pbURL, authManager, investigationHandler, patchHandler, rebootHandler)
 		realtimeClient.Start()
 	}()
 
@@ -602,6 +596,88 @@ func main() {
 			if err := metricsCollector.IngestMetrics(agentID, authManager, systemMetrics); err != nil {
 				logging.Error("Failed to ingest metrics: %v", err)
 			}
+		}
+	}()
+
+	// Start background refresh token renewal goroutine.
+	// Checks every token_renewal_check_interval_secs seconds whether the refresh token
+	// is within the renewal threshold. Only calls renew-refresh-token when needed.
+	// If renewal fails (e.g., API unreachable), retries every token_renewal_retry_interval_secs
+	// seconds until it succeeds, then resumes the normal check cycle.
+	go func() {
+		normalCheckInterval := time.Duration(cfg.TokenRenewalCheckIntervalSecs) * time.Second
+		retryInterval := time.Duration(cfg.TokenRenewalRetryIntervalSecs) * time.Second
+
+		nextCheck := time.Now().Add(normalCheckInterval)
+
+		for {
+			now := time.Now()
+			if now.Before(nextCheck) {
+				time.Sleep(time.Until(nextCheck))
+			}
+
+			token, err := authManager.LoadTokenRaw()
+			if err != nil {
+				logging.Warning("Token renewal check: failed to load token: %v", err)
+				nextCheck = time.Now().Add(normalCheckInterval)
+				continue
+			}
+			if token.RefreshToken == "" {
+				nextCheck = time.Now().Add(normalCheckInterval)
+				continue
+			}
+
+			// Get current refresh_token_expires_in via a standard refresh call
+			refreshResp, err := authManager.RefreshAccessToken(token.RefreshToken)
+			if err != nil {
+				logging.Warning("Token renewal check: refresh call failed: %v", err)
+				nextCheck = time.Now().Add(normalCheckInterval)
+				continue
+			}
+
+			// Update the access token with the fresh one from the refresh call
+			updatedToken := &types.AuthToken{
+				AccessToken:  refreshResp.AccessToken,
+				RefreshToken: token.RefreshToken, // unchanged — refresh doesn't rotate it
+				TokenType:    refreshResp.TokenType,
+				ExpiresAt:    time.Now().Add(time.Duration(refreshResp.ExpiresIn) * time.Second),
+				AgentID:      token.AgentID,
+			}
+			if saveErr := authManager.SaveToken(updatedToken); saveErr != nil {
+				logging.Warning("Token renewal check: failed to save updated token: %v", saveErr)
+			}
+
+			if !auth.NeedsRefreshTokenRenewal(refreshResp.RefreshTokenExpiresIn, cfg.TokenRenewalThresholdDays) {
+				// Not within the renewal window yet — schedule normal check
+				nextCheck = time.Now().Add(normalCheckInterval)
+				continue
+			}
+
+			// Within renewal window: attempt rotation
+			logging.Info("Refresh token expires in %ds (threshold: %d days) — renewing...",
+				refreshResp.RefreshTokenExpiresIn, cfg.TokenRenewalThresholdDays)
+			renewResp, err := authManager.RenewRefreshToken(token.RefreshToken)
+			if err != nil {
+				logging.Warning("Refresh token renewal failed: %v (will retry in 1 hour)", err)
+				nextCheck = time.Now().Add(retryInterval)
+				continue
+			}
+
+			newToken := &types.AuthToken{
+				AccessToken:  renewResp.AccessToken,
+				RefreshToken: renewResp.RefreshToken,
+				TokenType:    renewResp.TokenType,
+				ExpiresAt:    time.Now().Add(time.Duration(renewResp.ExpiresIn) * time.Second),
+				AgentID:      token.AgentID,
+			}
+			if err := authManager.SaveToken(newToken); err != nil {
+				logging.Warning("Failed to save renewed token: %v (will retry in 1 hour)", err)
+				nextCheck = time.Now().Add(retryInterval)
+				continue
+			}
+
+			logging.Info("Refresh token renewed and saved successfully")
+			nextCheck = time.Now().Add(normalCheckInterval)
 		}
 	}()
 

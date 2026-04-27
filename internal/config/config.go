@@ -26,6 +26,12 @@ type Config struct {
 	// See docs/CONFIGURATION.md for details on when to adjust these.
 	HTTPTransport HTTPTransportConfig `yaml:"http_transport"`
 
+	// Token renewal: start renewing when refresh token has fewer than this many days left.
+	// If renewal fails, the agent retries every TokenRenewalRetryIntervalSecs seconds.
+	TokenRenewalThresholdDays     int `yaml:"token_renewal_threshold_days"`
+	TokenRenewalCheckIntervalSecs int `yaml:"token_renewal_check_interval_secs"`
+	TokenRenewalRetryIntervalSecs int `yaml:"token_renewal_retry_interval_secs"`
+
 	// Debug/Development
 	Debug bool `yaml:"debug"`
 }
@@ -79,12 +85,15 @@ type HTTPTransportConfig struct {
 }
 
 var DefaultConfig = Config{
-	TokenPath:       "/var/lib/nannyagent/token.json", // Default to system directory
-	PortalURL:       "https://nannyai.dev",            // Default portal URL
-	MetricsInterval: 30,
-	ProxmoxInterval: 5 * 60, // Default to 300 seconds (5 minutes)
-	Debug:           false,
-	HTTPTransport:   DefaultHTTPTransportConfig,
+	TokenPath:                     "/var/lib/nannyagent/token.json", // Default to system directory
+	PortalURL:                     "https://nannyai.dev",            // Default portal URL
+	MetricsInterval:               30,
+	ProxmoxInterval:               5 * 60, // Default to 300 seconds (5 minutes)
+	TokenRenewalThresholdDays:     7,      // Renew refresh token when < 7 days remain
+	TokenRenewalCheckIntervalSecs: 21600,  // Check every 6 hours (21600s) normally
+	TokenRenewalRetryIntervalSecs: 3600,   // Retry every 1 hour (3600s) if renewal failed
+	Debug:                         false,
+	HTTPTransport:                 DefaultHTTPTransportConfig,
 }
 
 // DefaultHTTPTransportConfig provides sensible defaults for HTTP transport.
