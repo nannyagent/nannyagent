@@ -42,17 +42,32 @@ func showHelp() {
 	fmt.Println("NannyAgent - AI-Powered Linux Diagnostic Agent")
 	fmt.Printf("Version: %s\n\n", Version)
 	fmt.Println("USAGE:")
-	fmt.Printf("  %s [COMMAND]\n\n", os.Args[0])
+	fmt.Printf("  %s [COMMAND] [OPTIONS]\n\n", os.Args[0])
 	fmt.Println("COMMANDS:")
-	fmt.Println("  --register           Register agent with NannyAI")
-	fmt.Println("  --status             Show agent status")
-	fmt.Println("  --diagnose <issue>   Run one-off diagnosis")
-	fmt.Println("  --daemon             Run as daemon (systemd)")
-	fmt.Println("  --version            Show version")
-	fmt.Println("  --help               Show this help")
+	fmt.Println("  --register                  Register agent with NannyAI")
+	fmt.Println("  --status                    Show agent status")
+	fmt.Println("  --diagnose <issue>          Run one-off diagnosis")
+	fmt.Println("  --daemon                    Run as daemon (systemd)")
+	fmt.Println("  --version                   Show version")
+	fmt.Println("  --help                      Show this help")
+	fmt.Println()
+	fmt.Println("CONFIG OVERRIDES (higher priority than config.yaml):")
+	fmt.Println("  --api-url <url>             NannyAPI endpoint URL")
+	fmt.Println("  --portal-url <url>          Portal URL for device authorization")
+	fmt.Println("  --token-path <path>         Token storage path")
+	fmt.Println("  --metrics-interval <secs>   Metrics collection interval")
+	fmt.Println("  --proxmox-interval <secs>   Proxmox data collection interval")
+	fmt.Println("  --agent-id <id>             Agent ID (for static token mode)")
+	fmt.Println("  --debug                     Enable debug mode")
+	fmt.Println()
+	fmt.Println("AUTHENTICATION:")
+	fmt.Println("  OAuth2 (default):   Register interactively with --register")
+	fmt.Println("  Static token:       Set static_token in /etc/nannyagent/config.yaml")
+	fmt.Println("                      Then run --register to auto-register")
 	fmt.Println()
 	fmt.Println("EXAMPLES:")
 	fmt.Println("  sudo nannyagent --register")
+	fmt.Println("  sudo nannyagent --register --api-url http://localhost:8090")
 	fmt.Println("  nannyagent --status")
 	fmt.Println("  sudo nannyagent --diagnose \"postgresql is slow\"")
 	fmt.Println("  sudo nannyagent    # Interactive mode")
@@ -139,7 +154,9 @@ func validateDiagnosisPrompt(prompt string) error {
 }
 
 // testAPIConnectivity tests if we can reach the API endpoint using NannyAPI
-func testAPIConnectivity(cfg *config.Config, authManager *auth.AuthManager, agentID string) error {
+func testAPIConnectivity(cfg *config.Config, authManager interface {
+	AuthenticatedRequest(method, url string, body []byte, headers map[string]string) (int, []byte, error)
+}, agentID string) error {
 	// Test by sending metrics to NannyAPI /api/agent endpoint
 	metricsCollector := metrics.NewCollector(Version, cfg.APIBaseURL)
 	systemMetrics, err := metricsCollector.GatherSystemMetrics()
@@ -168,7 +185,7 @@ func checkExistingAgentInstance() error {
 }
 
 // runRegisterCommand handles agent registration with NannyAPI device flow
-func runRegisterCommand() {
+func runRegisterCommand(cliFlags *config.CLIFlags) {
 	logging.Info("Starting NannyAgent registration with NannyAPI")
 
 	// Check if agent is already registered on this machine
@@ -188,20 +205,110 @@ func runRegisterCommand() {
 		cfg.APIBaseURL = os.Getenv("NANNYAPI_URL")
 	}
 
+	// Apply CLI flags (highest priority)
+	cfg.ApplyCLIFlags(cliFlags)
+
 	// Ensure we have a NannyAPI URL
 	if cfg.APIBaseURL == "" {
 		logging.Error("NannyAPI URL not configured")
-		logging.Error("Set NANNYAPI_URL environment variable or configure in /etc/nannyagent/config.yaml")
+		logging.Error("Set NANNYAPI_URL environment variable, configure in /etc/nannyagent/config.yaml,")
+		logging.Error("or pass --api-url <url>")
 		os.Exit(1)
 	}
 
 	// Ensure token path uses hardcoded DataDir
 	cfg.TokenPath = filepath.Join(DataDir, "token.json")
 
+	// ── Static token registration (fully automated, no user interaction) ────
+	if cfg.UseStaticToken() {
+		runStaticTokenRegister(cfg)
+		return
+	}
+
+	// ── OAuth2 device flow registration (interactive) ──────────────────────
+	runOAuthRegister(cfg)
+}
+
+// runStaticTokenRegister performs automated registration using a static token.
+// It starts device auth, auto-authorizes via the static token, and registers.
+func runStaticTokenRegister(cfg *config.Config) {
+	logging.Info("Using static token for automated registration")
+
+	staticAuth := auth.NewStaticTokenAuthManager(cfg)
+
+	// Step 1: Start device authorization (anonymous, no auth needed)
+	oauthMgr := auth.NewAuthManager(cfg)
+	deviceAuth, err := oauthMgr.StartDeviceAuthorization()
+	if err != nil {
+		logging.Error("Failed to start device authorization: %v", err)
+		os.Exit(1)
+	}
+
+	logging.Info("Device code obtained, auto-authorizing with static token...")
+
+	// Step 2: Auto-authorize the device code using the static token.
+	// The static token acts as the user, so we can approve the device code.
+	authorizePayload := fmt.Sprintf(`{"action":"authorize","user_code":"%s"}`, deviceAuth.UserCode)
+	statusCode, body, err := staticAuth.AuthenticatedRequest(
+		"POST",
+		fmt.Sprintf("%s/api/agent", cfg.APIBaseURL),
+		[]byte(authorizePayload),
+		nil,
+	)
+	if err != nil {
+		logging.Error("Failed to auto-authorize device code: %v", err)
+		os.Exit(1)
+	}
+	if statusCode != 200 {
+		logging.Error("Auto-authorize failed (status %d): %s", statusCode, string(body))
+		os.Exit(1)
+	}
+
+	logging.Info("Device code authorized automatically")
+
+	// Step 3: Register the agent (uses device_code, anonymous)
+	tokenResp, err := oauthMgr.PollForTokenAfterAuthorization(deviceAuth.DeviceCode)
+	if err != nil {
+		logging.Error("Registration failed: %v", err)
+		os.Exit(1)
+	}
+
+	// Step 4: Save agent_id to config (discard OAuth tokens since we use static token)
+	logging.Info("Registration successful!")
+	logging.Info("Agent ID: %s", tokenResp.AgentID)
+
+	if err := cfg.SaveAgentID(tokenResp.AgentID); err != nil {
+		logging.Warning("Could not save agent_id to config file: %v", err)
+		logging.Info("Please add manually: agent_id: \"%s\" to /etc/nannyagent/config.yaml", tokenResp.AgentID)
+	} else {
+		logging.Info("Agent ID saved to /etc/nannyagent/config.yaml")
+	}
+
+	// Also save the token file so that checkExistingAgentInstance works and
+	// --status can read the agent_id. We save it with just the agent_id.
+	token := &types.AuthToken{
+		AgentID:   tokenResp.AgentID,
+		TokenType: "static",
+		ExpiresAt: time.Now().Add(100 * 365 * 24 * time.Hour), // effectively never
+	}
+
+	authMgr := auth.NewAuthManager(cfg)
+	if err := authMgr.SaveToken(token); err != nil {
+		logging.Warning("Failed to save token marker file: %v", err)
+	}
+
+	logging.Info("")
+	logging.Info("Next steps:")
+	logging.Info("  1. Enable and start the service: sudo systemctl enable --now nannyagent")
+	logging.Info("  2. Check status: nannyagent --status")
+	logging.Info("  3. View logs: sudo journalctl -u nannyagent -f")
+	os.Exit(0)
+}
+
+// runOAuthRegister performs the interactive OAuth2 device flow registration.
+func runOAuthRegister(cfg *config.Config) {
 	// Initialize auth manager with NannyAPI URL
 	authManager := auth.NewAuthManager(cfg)
-
-	// Collect system information for registration (used later in register request)
 
 	// Step 1: Start device authorization
 	logging.Info("Initiating NannyAPI device authorization flow...")
@@ -257,7 +364,7 @@ func runRegisterCommand() {
 }
 
 // runStatusCommand shows agent connectivity and status with NannyAPI (stdout only)
-func runStatusCommand() {
+func runStatusCommand(cliFlags *config.CLIFlags) {
 	// Disable syslog for status command - everything goes to stdout only
 	logging.DisableSyslogOnly()
 
@@ -268,12 +375,22 @@ func runStatusCommand() {
 		os.Exit(1)
 	}
 
+	// Apply CLI flags
+	cfg.ApplyCLIFlags(cliFlags)
+
 	// Show API endpoint
 	apiURL := cfg.APIBaseURL
 	if apiURL == "" {
 		apiURL = os.Getenv("NANNYAPI_URL")
 	}
 	fmt.Printf("API Endpoint: %s\n", apiURL)
+
+	// Show auth mode
+	if cfg.UseStaticToken() {
+		fmt.Println("Auth Mode: Static Token")
+	} else {
+		fmt.Println("Auth Mode: OAuth2")
+	}
 
 	// Check if token exists
 	tokenPath := filepath.Join(DataDir, "token.json")
@@ -283,35 +400,62 @@ func runStatusCommand() {
 		os.Exit(1)
 	}
 
-	// Load and refresh token if needed
-	authManager := auth.NewAuthManager(cfg)
-	_, err = authManager.EnsureAuthenticated()
-	if err != nil {
-		fmt.Println("Authentication failed")
-		os.Exit(1)
-	}
+	if cfg.UseStaticToken() {
+		// Static token mode: get agent ID from config or token file
+		agentID := cfg.AgentID
+		if agentID == "" {
+			authManager := auth.NewAuthManager(cfg)
+			agentID, err = authManager.GetCurrentAgentID()
+			if err != nil {
+				fmt.Println("Failed to get Agent ID")
+				os.Exit(1)
+			}
+		}
+		fmt.Printf("Agent ID: %s\n", agentID)
 
-	// Get Agent ID
-	agentID, err := authManager.GetCurrentAgentID()
-	if err != nil {
-		fmt.Println("Failed to get Agent ID")
-		os.Exit(1)
-	}
+		// Test connectivity
+		staticAuth := auth.NewStaticTokenAuthManager(cfg)
+		if agentID != "" {
+			staticAuth.SetAgentID(agentID)
+		}
+		metricsCollector := metrics.NewCollector(Version, cfg.APIBaseURL)
+		systemMetrics, err := metricsCollector.GatherSystemMetrics()
+		if err != nil {
+			fmt.Println("Failed to gather metrics")
+			os.Exit(1)
+		}
+		err = metricsCollector.IngestMetrics(agentID, staticAuth, systemMetrics)
+		if err != nil {
+			fmt.Println("Metrics ingestion failed")
+			os.Exit(1)
+		}
+	} else {
+		// OAuth mode
+		authManager := auth.NewAuthManager(cfg)
+		_, err = authManager.EnsureAuthenticated()
+		if err != nil {
+			fmt.Println("Authentication failed")
+			os.Exit(1)
+		}
 
-	fmt.Printf("Agent ID: %s\n", agentID)
+		agentID, err := authManager.GetCurrentAgentID()
+		if err != nil {
+			fmt.Println("Failed to get Agent ID")
+			os.Exit(1)
+		}
+		fmt.Printf("Agent ID: %s\n", agentID)
 
-	// Test connectivity by sending metrics to backend API
-	metricsCollector := metrics.NewCollector(Version, cfg.APIBaseURL)
-	systemMetrics, err := metricsCollector.GatherSystemMetrics()
-	if err != nil {
-		fmt.Println("Failed to gather metrics")
-		os.Exit(1)
-	}
-
-	err = metricsCollector.IngestMetrics(agentID, authManager, systemMetrics)
-	if err != nil {
-		fmt.Println("Metrics ingestion failed")
-		os.Exit(1)
+		metricsCollector := metrics.NewCollector(Version, cfg.APIBaseURL)
+		systemMetrics, err := metricsCollector.GatherSystemMetrics()
+		if err != nil {
+			fmt.Println("Failed to gather metrics")
+			os.Exit(1)
+		}
+		err = metricsCollector.IngestMetrics(agentID, authManager, systemMetrics)
+		if err != nil {
+			fmt.Println("Metrics ingestion failed")
+			os.Exit(1)
+		}
 	}
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		cmd := exec.Command("systemctl", "is-active", "nannyagent")
@@ -391,60 +535,51 @@ func runInteractiveDiagnostics(diagAgent *agent.LinuxDiagnosticAgent) {
 }
 
 func main() {
-	// Define flags (all with -- prefix for uniformity)
-	versionFlag := flag.Bool("version", false, "Show version information")
-	helpFlag := flag.Bool("help", false, "Show help information")
-	registerFlag := flag.Bool("register", false, "Register agent with NannyAI backend")
-	statusFlag := flag.Bool("status", false, "Show agent status and connectivity")
-	diagnoseFlag := flag.String("diagnose", "", "Run one-off diagnosis (e.g., --diagnose \"postgresql is slow\")")
-	daemonFlag := flag.Bool("daemon", false, "Run as daemon (systemd mode)")
-	flag.Parse()
+	// Parse CLI flags (all config options available as --flag)
+	cliFlags := config.ParseCLIFlags()
 
 	// Also check for commands without -- prefix (for backward compatibility)
-	// But log a warning to use -- prefix
 	if flag.NArg() > 0 {
 		cmd := flag.Arg(0)
 		switch cmd {
 		case "register":
 			logging.Warning("Please use: nannyagent --register (with -- prefix)")
-			*registerFlag = true
+			cliFlags.Register = true
 		case "status":
 			logging.Warning("Please use: nannyagent --status (with -- prefix)")
-			*statusFlag = true
+			cliFlags.Status = true
 		case "diagnose":
 			logging.Warning("Please use: nannyagent --diagnose (with -- prefix)")
 			if flag.NArg() > 1 {
-				*diagnoseFlag = flag.Arg(1)
-			} else {
-				*diagnoseFlag = ""
+				cliFlags.Diagnose = flag.Arg(1)
 			}
 		case "daemon":
 			logging.Warning("Please use: nannyagent --daemon (with -- prefix)")
-			*daemonFlag = true
+			cliFlags.Daemon = true
 		}
 	}
 
 	// Whitelist: commands that don't require root or auth
 	// Handle --version flag (no root required)
-	if *versionFlag {
+	if cliFlags.Version {
 		showVersion()
 	}
 
 	// Handle --help flag (no root required)
-	if *helpFlag {
+	if cliFlags.Help {
 		showHelp()
 	}
 
 	// Handle --status flag (no root or auth required) - EXIT IMMEDIATELY
-	if *statusFlag {
-		runStatusCommand()
+	if cliFlags.Status {
+		runStatusCommand(cliFlags)
 		return
 	}
 
 	// Handle --register flag (requires root, no auth needed) - EXIT IMMEDIATELY
-	if *registerFlag {
+	if cliFlags.Register {
 		checkRootPrivileges()
-		runRegisterCommand()
+		runRegisterCommand(cliFlags)
 		return
 	}
 
@@ -464,13 +599,157 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Apply CLI flags (highest priority)
+	cfg.ApplyCLIFlags(cliFlags)
+
 	cfg.PrintConfig()
 
+	// ── Branch on authentication mode ──────────────────────────────────────
+	if cfg.UseStaticToken() {
+		runWithStaticToken(cfg, cliFlags)
+	} else {
+		runWithOAuth(cfg, cliFlags)
+	}
+}
+
+// runWithStaticToken runs the agent using a static API token.
+// No OAuth token refresh or renewal goroutines are started.
+func runWithStaticToken(cfg *config.Config, cliFlags *config.CLIFlags) {
+	staticAuth := auth.NewStaticTokenAuthManager(cfg)
+
+	// Verify we have an agent ID
+	agentID, err := staticAuth.GetCurrentAgentID()
+	if err != nil {
+		// Try loading from token file as fallback
+		oauthMgr := auth.NewAuthManager(cfg)
+		agentID, err = oauthMgr.GetCurrentAgentID()
+		if err != nil {
+			logging.Error("Agent ID not found. Register first: sudo nannyagent --register")
+			os.Exit(1)
+		}
+		staticAuth.SetAgentID(agentID)
+	}
+
+	// Verify static token works
+	if err := staticAuth.EnsureAuthenticated(); err != nil {
+		logging.Error("Static token authentication failed: %v", err)
+		os.Exit(1)
+	}
+
+	// Test API connectivity
+	logging.Info("Testing connectivity to NannyAPI with static token...")
+	if err := testAPIConnectivity(cfg, staticAuth, agentID); err != nil {
+		logging.Error("Cannot connect to NannyAPI API: %v", err)
+		logging.Error("Endpoint: %s", cfg.APIBaseURL)
+		os.Exit(1)
+	}
+	logging.Info("API connectivity OK (static token mode)")
+
+	// Initialize the diagnostic agent
+	diagAgent := agent.NewLinuxDiagnosticAgentWithAuth(staticAuth, cfg.APIBaseURL)
+
+	// Handle --diagnose flag
+	if cliFlags.Diagnose != "" {
+		logging.Info("Running one-off diagnosis...")
+		if err := validateDiagnosisPrompt(cliFlags.Diagnose); err != nil {
+			logging.Error("%v", err)
+			os.Exit(1)
+		}
+		if err := diagAgent.DiagnoseIssue(cliFlags.Diagnose); err != nil {
+			logging.Error("Diagnosis failed: %v", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	// Start SSE connection
+	go func() {
+		investigationHandler := func(id, prompt string) {
+			prompt = strings.TrimSpace(prompt)
+			investigationAgent := agent.NewLinuxDiagnosticAgentWithAuth(staticAuth, cfg.APIBaseURL)
+			investigationAgent.SetInvestigationID(id)
+			if err := investigationAgent.DiagnoseIssueWithInvestigation(prompt); err != nil {
+				logging.Error("Investigation %s failed: %v", id, err)
+			} else {
+				logging.Info("Investigation %s completed successfully", id)
+			}
+		}
+
+		patchHandler := func(payload types.AgentPatchPayload) {
+			logging.Info("Triggering patch operation %s (mode: %s)...", payload.OperationID, payload.Mode)
+			patchManager := patches.NewPatchManager(cfg.APIBaseURL, staticAuth, agentID)
+			if err := patchManager.HandlePatchOperation(payload); err != nil {
+				logging.Error("Patch operation %s failed: %v", payload.OperationID, err)
+			}
+		}
+
+		rebootHandler := func(payload types.AgentRebootPayload) {
+			logging.Info("Triggering reboot operation %s...", payload.RebootID)
+			rebootManager := reboot.NewRebootManager(cfg.APIBaseURL, staticAuth)
+			if err := rebootManager.HandleRebootOperation(payload); err != nil {
+				logging.Error("Reboot operation %s failed: %v", payload.RebootID, err)
+			}
+		}
+
+		realtimeClient := realtime.NewClient(cfg.APIBaseURL, staticAuth, investigationHandler, patchHandler, rebootHandler)
+		realtimeClient.Start()
+	}()
+
+	// Start metrics ingestion
+	go func() {
+		logging.Info("Starting metrics ingestion (interval: %ds, static token)...", cfg.MetricsInterval)
+		metricsCollector := metrics.NewCollector(Version, cfg.APIBaseURL)
+		ticker := time.NewTicker(time.Duration(cfg.MetricsInterval) * time.Second)
+		defer ticker.Stop()
+
+		systemMetrics, err := metricsCollector.GatherSystemMetrics()
+		if err == nil {
+			if err := metricsCollector.IngestMetrics(agentID, staticAuth, systemMetrics); err != nil {
+				logging.Error("Failed to ingest initial metrics: %v", err)
+			}
+		}
+
+		for range ticker.C {
+			systemMetrics, err := metricsCollector.GatherSystemMetrics()
+			if err != nil {
+				logging.Error("Failed to gather metrics: %v", err)
+				continue
+			}
+			if err := metricsCollector.IngestMetrics(agentID, staticAuth, systemMetrics); err != nil {
+				logging.Error("Failed to ingest metrics: %v", err)
+			}
+		}
+	}()
+
+	// No token renewal goroutine needed for static tokens
+
+	// Start Proxmox collector
+	proxmoxManager := proxmox.NewManager(cfg, staticAuth)
+	proxmoxManager.Start()
+
+	// Check if running in daemon mode
+	if cliFlags.Daemon {
+		if err := logging.EnableSyslogOnly(); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to initialize syslog: %v\n", err)
+			os.Exit(1)
+		}
+		logging.Info("Running in daemon mode (static token, no interactive session)")
+		select {}
+	}
+
+	// Interactive mode
+	if !cliFlags.Daemon {
+		runInteractiveDiagnostics(diagAgent)
+	}
+}
+
+// runWithOAuth runs the agent using the traditional OAuth2 device flow.
+func runWithOAuth(cfg *config.Config, cliFlags *config.CLIFlags) {
 	// Initialize components
 	authManager := auth.NewAuthManager(cfg)
 
 	// Ensure authentication
-	_, err = authManager.EnsureAuthenticated()
+	_, err := authManager.EnsureAuthenticated()
 	if err != nil {
 		logging.Error("Authentication failed: %v", err)
 		os.Exit(1)
@@ -502,17 +781,17 @@ func main() {
 	diagAgent := agent.NewLinuxDiagnosticAgentWithAuth(authManager, cfg.APIBaseURL)
 
 	// Handle --diagnose flag (one-off diagnosis)
-	if *diagnoseFlag != "" {
+	if cliFlags.Diagnose != "" {
 		logging.Info("Running one-off diagnosis...")
 
 		// Validate the diagnosis prompt
-		if err := validateDiagnosisPrompt(*diagnoseFlag); err != nil {
+		if err := validateDiagnosisPrompt(cliFlags.Diagnose); err != nil {
 			logging.Error("%v", err)
 			logging.Info("Example: sudo nannyagent --diagnose \"postgresql is slow and using high CPU\"")
 			os.Exit(1)
 		}
 
-		if err := diagAgent.DiagnoseIssue(*diagnoseFlag); err != nil {
+		if err := diagAgent.DiagnoseIssue(cliFlags.Diagnose); err != nil {
 			logging.Error("Diagnosis failed: %v", err)
 			os.Exit(1)
 		}
@@ -521,14 +800,10 @@ func main() {
 
 	// Start SSE connection in a separate goroutine
 	go func() {
-		// Define the handler for investigations
 		investigationHandler := func(id, prompt string) {
 			prompt = strings.TrimSpace(prompt)
-
-			// Create a new agent instance for this investigation to ensure isolation
 			investigationAgent := agent.NewLinuxDiagnosticAgentWithAuth(authManager, cfg.APIBaseURL)
 			investigationAgent.SetInvestigationID(id)
-
 			if err := investigationAgent.DiagnoseIssueWithInvestigation(prompt); err != nil {
 				logging.Error("Investigation %s failed: %v", id, err)
 			} else {
@@ -536,13 +811,9 @@ func main() {
 			}
 		}
 
-		// Define the handler for patch operations
 		patchHandler := func(payload types.AgentPatchPayload) {
 			logging.Info("Triggering patch operation %s (mode: %s)...", payload.OperationID, payload.Mode)
-
-			// Create patch manager
 			patchManager := patches.NewPatchManager(cfg.APIBaseURL, authManager, agentID)
-
 			if err := patchManager.HandlePatchOperation(payload); err != nil {
 				logging.Error("Patch operation %s failed: %v", payload.OperationID, err)
 			} else {
@@ -550,13 +821,9 @@ func main() {
 			}
 		}
 
-		// Define the handler for reboot operations
 		rebootHandler := func(payload types.AgentRebootPayload) {
 			logging.Info("Triggering reboot operation %s...", payload.RebootID)
-
-			// Create reboot manager
 			rebootManager := reboot.NewRebootManager(cfg.APIBaseURL, authManager)
-
 			if err := rebootManager.HandleRebootOperation(payload); err != nil {
 				logging.Error("Reboot operation %s failed: %v", payload.RebootID, err)
 			} else {
@@ -564,10 +831,7 @@ func main() {
 			}
 		}
 
-		// Create and start the realtime client
-		// Use NANNYAPI_URL from env or default
-		pbURL := cfg.APIBaseURL
-		realtimeClient := realtime.NewClient(pbURL, authManager, investigationHandler, patchHandler, rebootHandler)
+		realtimeClient := realtime.NewClient(cfg.APIBaseURL, authManager, investigationHandler, patchHandler, rebootHandler)
 		realtimeClient.Start()
 	}()
 
@@ -578,7 +842,6 @@ func main() {
 		ticker := time.NewTicker(time.Duration(cfg.MetricsInterval) * time.Second)
 		defer ticker.Stop()
 
-		// Ingest immediately on start
 		systemMetrics, err := metricsCollector.GatherSystemMetrics()
 		if err == nil {
 			if err := metricsCollector.IngestMetrics(agentID, authManager, systemMetrics); err != nil {
@@ -592,18 +855,13 @@ func main() {
 				logging.Error("Failed to gather metrics: %v", err)
 				continue
 			}
-
 			if err := metricsCollector.IngestMetrics(agentID, authManager, systemMetrics); err != nil {
 				logging.Error("Failed to ingest metrics: %v", err)
 			}
 		}
 	}()
 
-	// Start background refresh token renewal goroutine.
-	// Checks every token_renewal_check_interval_secs seconds whether the refresh token
-	// is within the renewal threshold. Only calls renew-refresh-token when needed.
-	// If renewal fails (e.g., API unreachable), retries every token_renewal_retry_interval_secs
-	// seconds until it succeeds, then resumes the normal check cycle.
+	// Start background refresh token renewal goroutine (OAuth only)
 	go func() {
 		normalCheckInterval := time.Duration(cfg.TokenRenewalCheckIntervalSecs) * time.Second
 		retryInterval := time.Duration(cfg.TokenRenewalRetryIntervalSecs) * time.Second
@@ -627,7 +885,6 @@ func main() {
 				continue
 			}
 
-			// Get current refresh_token_expires_in via a standard refresh call
 			refreshResp, err := authManager.RefreshAccessToken(token.RefreshToken)
 			if err != nil {
 				logging.Warning("Token renewal check: refresh call failed: %v", err)
@@ -635,10 +892,9 @@ func main() {
 				continue
 			}
 
-			// Update the access token with the fresh one from the refresh call
 			updatedToken := &types.AuthToken{
 				AccessToken:  refreshResp.AccessToken,
-				RefreshToken: token.RefreshToken, // unchanged — refresh doesn't rotate it
+				RefreshToken: token.RefreshToken,
 				TokenType:    refreshResp.TokenType,
 				ExpiresAt:    time.Now().Add(time.Duration(refreshResp.ExpiresIn) * time.Second),
 				AgentID:      token.AgentID,
@@ -648,12 +904,10 @@ func main() {
 			}
 
 			if !auth.NeedsRefreshTokenRenewal(refreshResp.RefreshTokenExpiresIn, cfg.TokenRenewalThresholdDays) {
-				// Not within the renewal window yet — schedule normal check
 				nextCheck = time.Now().Add(normalCheckInterval)
 				continue
 			}
 
-			// Within renewal window: attempt rotation
 			logging.Info("Refresh token expires in %ds (threshold: %d days) — renewing...",
 				refreshResp.RefreshTokenExpiresIn, cfg.TokenRenewalThresholdDays)
 			renewResp, err := authManager.RenewRefreshToken(token.RefreshToken)
@@ -686,8 +940,7 @@ func main() {
 	proxmoxManager.Start()
 
 	// Check if running in daemon mode
-	if *daemonFlag {
-		// Switch to syslog-only logging first to avoid duplicates
+	if cliFlags.Daemon {
 		if err := logging.EnableSyslogOnly(); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to initialize syslog: %v\n", err)
 			os.Exit(1)
@@ -695,14 +948,11 @@ func main() {
 
 		logging.Info("Running in daemon mode (no interactive session)")
 		logging.Info("Logs will be sent to syslog. View with: journalctl -u nannyagent -f")
-
-		// Block forever, let background goroutines handle everything
 		select {}
 	}
 
 	// Handle interactive mode (default if no flags)
-	if !*daemonFlag {
+	if !cliFlags.Daemon {
 		runInteractiveDiagnostics(diagAgent)
-		return
 	}
 }

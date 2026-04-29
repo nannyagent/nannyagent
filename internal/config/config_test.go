@@ -356,3 +356,210 @@ func TestHTTPTransportConfig_Validate(t *testing.T) {
 		})
 	}
 }
+
+func TestUseStaticToken(t *testing.T) {
+	tests := []struct {
+		name        string
+		staticToken string
+		want        bool
+	}{
+		{"valid nsk token", "nsk_abc123def456", true},
+		{"empty token", "", false},
+		{"non-nsk prefix", "invalid_token", false},
+		{"just nsk_", "nsk_", true},
+		{"partial nsk", "nsk", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{StaticToken: tt.staticToken}
+			if got := cfg.UseStaticToken(); got != tt.want {
+				t.Errorf("UseStaticToken() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidate_StaticToken(t *testing.T) {
+	tests := []struct {
+		name        string
+		staticToken string
+		wantErr     bool
+	}{
+		{"valid nsk token", "nsk_abc123", false},
+		{"empty token", "", false},
+		{"invalid prefix", "bad_token", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				APIBaseURL:                    "https://test.nannyai.dev",
+				StaticToken:                   tt.staticToken,
+				HTTPTransport:                 DefaultHTTPTransportConfig,
+				TokenRenewalThresholdDays:     DefaultConfig.TokenRenewalThresholdDays,
+				TokenRenewalCheckIntervalSecs: DefaultConfig.TokenRenewalCheckIntervalSecs,
+				TokenRenewalRetryIntervalSecs: DefaultConfig.TokenRenewalRetryIntervalSecs,
+			}
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Error("Expected error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestApplyCLIFlags(t *testing.T) {
+	cfg := &Config{
+		APIBaseURL:      "https://yaml.nannyai.dev",
+		PortalURL:       "https://yaml.portal.dev",
+		TokenPath:       "/yaml/token.json",
+		MetricsInterval: 30,
+		ProxmoxInterval: 300,
+		Debug:           false,
+	}
+
+	flags := &CLIFlags{
+		APIBaseURL:      "https://cli.nannyai.dev",
+		MetricsInterval: 60,
+		AgentID:         "cli_agent_id",
+		Debug:           true,
+		DebugSet:        true,
+	}
+
+	cfg.ApplyCLIFlags(flags)
+
+	if cfg.APIBaseURL != "https://cli.nannyai.dev" {
+		t.Errorf("APIBaseURL = %v, want https://cli.nannyai.dev", cfg.APIBaseURL)
+	}
+	if cfg.MetricsInterval != 60 {
+		t.Errorf("MetricsInterval = %v, want 60", cfg.MetricsInterval)
+	}
+	if cfg.AgentID != "cli_agent_id" {
+		t.Errorf("AgentID = %v, want cli_agent_id", cfg.AgentID)
+	}
+	if !cfg.Debug {
+		t.Error("Debug should be true")
+	}
+
+	// Non-overridden values should remain
+	if cfg.PortalURL != "https://yaml.portal.dev" {
+		t.Errorf("PortalURL = %v, want https://yaml.portal.dev", cfg.PortalURL)
+	}
+	if cfg.TokenPath != "/yaml/token.json" {
+		t.Errorf("TokenPath = %v, want /yaml/token.json", cfg.TokenPath)
+	}
+	if cfg.ProxmoxInterval != 300 {
+		t.Errorf("ProxmoxInterval = %v, want 300", cfg.ProxmoxInterval)
+	}
+}
+
+func TestApplyCLIFlags_NoOverride(t *testing.T) {
+	cfg := &Config{
+		APIBaseURL:      "https://yaml.nannyai.dev",
+		MetricsInterval: 30,
+		Debug:           true,
+	}
+
+	flags := &CLIFlags{}
+	cfg.ApplyCLIFlags(flags)
+
+	if cfg.APIBaseURL != "https://yaml.nannyai.dev" {
+		t.Errorf("APIBaseURL changed unexpectedly to %v", cfg.APIBaseURL)
+	}
+	if cfg.MetricsInterval != 30 {
+		t.Errorf("MetricsInterval changed unexpectedly to %v", cfg.MetricsInterval)
+	}
+	if !cfg.Debug {
+		t.Error("Debug should remain true when DebugSet is false")
+	}
+}
+
+func TestLoadConfig_StaticToken_FromYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	yamlContent := `
+nannyapi_url: https://test-api.nannyai.dev
+static_token: "nsk_abc123def456"
+agent_id: "agent_test_42"
+`
+	err := os.WriteFile(configPath, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test config: %v", err)
+	}
+
+	config := DefaultConfig
+	err = loadYAMLConfig(&config, configPath)
+	if err != nil {
+		t.Fatalf("loadYAMLConfig() failed: %v", err)
+	}
+
+	if config.StaticToken != "nsk_abc123def456" {
+		t.Errorf("StaticToken = %v, want nsk_abc123def456", config.StaticToken)
+	}
+	if config.AgentID != "agent_test_42" {
+		t.Errorf("AgentID = %v, want agent_test_42", config.AgentID)
+	}
+}
+
+func TestLoadConfig_StaticToken_EnvOverride(t *testing.T) {
+	_ = os.Setenv("NANNYAI_STATIC_TOKEN", "nsk_env_token")
+	_ = os.Setenv("NANNYAI_AGENT_ID", "env_agent_id")
+	defer func() {
+		_ = os.Unsetenv("NANNYAI_STATIC_TOKEN")
+		_ = os.Unsetenv("NANNYAI_AGENT_ID")
+	}()
+
+	config := DefaultConfig
+	if staticToken := os.Getenv("NANNYAI_STATIC_TOKEN"); staticToken != "" {
+		config.StaticToken = staticToken
+	}
+	if agentID := os.Getenv("NANNYAI_AGENT_ID"); agentID != "" {
+		config.AgentID = agentID
+	}
+
+	if config.StaticToken != "nsk_env_token" {
+		t.Errorf("StaticToken = %v, want nsk_env_token", config.StaticToken)
+	}
+	if config.AgentID != "env_agent_id" {
+		t.Errorf("AgentID = %v, want env_agent_id", config.AgentID)
+	}
+}
+
+func TestSaveAgentID_Append(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	initialContent := `nannyapi_url: "https://test-api.nannyai.dev"
+static_token: "nsk_abc123"
+`
+	err := os.WriteFile(configPath, []byte(initialContent), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test config: %v", err)
+	}
+
+	// Simulate SaveAgentID logic (appending)
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("Failed to read: %v", err)
+	}
+	content := string(data)
+	content += "\nagent_id: \"new_agent_123\"\n"
+
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
+
+	var loadedCfg Config
+	err = loadYAMLConfig(&loadedCfg, configPath)
+	if err != nil {
+		t.Fatalf("Failed to reload config: %v", err)
+	}
+	if loadedCfg.AgentID != "new_agent_123" {
+		t.Errorf("AgentID = %v, want new_agent_123", loadedCfg.AgentID)
+	}
+}

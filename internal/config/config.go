@@ -1,8 +1,10 @@
 package config
 
 import (
+	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"nannyagent/internal/logging"
 
@@ -21,6 +23,14 @@ type Config struct {
 	MetricsInterval int    `yaml:"metrics_interval"`
 	ProxmoxInterval int    `yaml:"proxmox_interval"`
 
+	// Static Token Authentication (alternative to OAuth2)
+	// When set, bypasses the OAuth2 device flow entirely.
+	// The token must be a valid NannyAPI static token (prefixed with nsk_).
+	StaticToken string `yaml:"static_token"`
+
+	// Agent ID (required when using static token, auto-populated after registration)
+	AgentID string `yaml:"agent_id"`
+
 	// HTTP Transport Configuration - for tuning connection behavior
 	// These help address HTTP/2 connection issues with long-running agents.
 	// See docs/CONFIGURATION.md for details on when to adjust these.
@@ -34,6 +44,92 @@ type Config struct {
 
 	// Debug/Development
 	Debug bool `yaml:"debug"`
+}
+
+// CLIFlags holds all command-line flag values for merging into Config.
+type CLIFlags struct {
+	// Commands
+	Register bool
+	Status   bool
+	Diagnose string
+	Daemon   bool
+	Version  bool
+	Help     bool
+
+	// Config overrides (nil/empty means not set)
+	APIBaseURL      string
+	PortalURL       string
+	TokenPath       string
+	MetricsInterval int
+	ProxmoxInterval int
+	AgentID         string
+	Debug           bool
+	DebugSet        bool // tracks whether --debug was explicitly passed
+}
+
+// ParseCLIFlags parses command-line arguments and returns structured flags.
+// CLI arguments have the highest priority and override YAML and env config.
+func ParseCLIFlags() *CLIFlags {
+	f := &CLIFlags{}
+
+	flag.BoolVar(&f.Register, "register", false, "Register agent with NannyAI")
+	flag.BoolVar(&f.Status, "status", false, "Show agent status")
+	flag.StringVar(&f.Diagnose, "diagnose", "", "Run one-off diagnosis (e.g., --diagnose \"postgresql is slow\")")
+	flag.BoolVar(&f.Daemon, "daemon", false, "Run as daemon (systemd)")
+	flag.BoolVar(&f.Version, "version", false, "Show version")
+	flag.BoolVar(&f.Help, "help", false, "Show help")
+
+	flag.StringVar(&f.APIBaseURL, "api-url", "", "NannyAPI endpoint URL (overrides config)")
+	flag.StringVar(&f.PortalURL, "portal-url", "", "Portal URL for device authorization")
+	flag.StringVar(&f.TokenPath, "token-path", "", "Token storage path")
+	flag.IntVar(&f.MetricsInterval, "metrics-interval", 0, "Metrics collection interval in seconds")
+	flag.IntVar(&f.ProxmoxInterval, "proxmox-interval", 0, "Proxmox data collection interval in seconds")
+	flag.StringVar(&f.AgentID, "agent-id", "", "Agent ID (for static token registration)")
+	flag.BoolVar(&f.Debug, "debug", false, "Enable debug mode")
+
+	flag.Parse()
+
+	// Track whether --debug was explicitly set
+	flag.Visit(func(fl *flag.Flag) {
+		if fl.Name == "debug" {
+			f.DebugSet = true
+		}
+	})
+
+	return f
+}
+
+// ApplyCLIFlags merges CLI flag values into the config. CLI flags have the
+// highest priority and override both YAML and environment variable settings.
+// Note: static_token is intentionally NOT exposed as a CLI flag for security
+// (it would be visible in the process list). Use config.yaml or env var only.
+func (c *Config) ApplyCLIFlags(f *CLIFlags) {
+	if f.APIBaseURL != "" {
+		c.APIBaseURL = f.APIBaseURL
+	}
+	if f.PortalURL != "" {
+		c.PortalURL = f.PortalURL
+	}
+	if f.TokenPath != "" {
+		c.TokenPath = f.TokenPath
+	}
+	if f.MetricsInterval > 0 {
+		c.MetricsInterval = f.MetricsInterval
+	}
+	if f.ProxmoxInterval > 0 {
+		c.ProxmoxInterval = f.ProxmoxInterval
+	}
+	if f.AgentID != "" {
+		c.AgentID = f.AgentID
+	}
+	if f.DebugSet {
+		c.Debug = f.Debug
+	}
+}
+
+// UseStaticToken returns true if a static token is configured.
+func (c *Config) UseStaticToken() bool {
+	return c.StaticToken != "" && strings.HasPrefix(c.StaticToken, "nsk_")
 }
 
 // HTTPTransportConfig contains settings for the HTTP client transport.
@@ -130,7 +226,7 @@ func LoadConfig() (*Config, error) {
 		logging.Warning("No configuration file found at /etc/nannyagent/config.yaml. Using environment variables only.")
 	}
 
-	// Load from environment variables (highest priority - overrides file config)
+	// Load from environment variables (overrides file config, but CLI overrides env)
 	// NannyAPI configuration (primary)
 	if url := os.Getenv("NANNYAPI_URL"); url != "" {
 		config.APIBaseURL = url
@@ -146,6 +242,16 @@ func LoadConfig() (*Config, error) {
 
 	if debug := os.Getenv("DEBUG"); debug == "true" || debug == "1" {
 		config.Debug = true
+	}
+
+	// Static token from environment variable (e.g. from .env or shell)
+	if staticToken := os.Getenv("NANNYAI_STATIC_TOKEN"); staticToken != "" {
+		config.StaticToken = staticToken
+	}
+
+	// Agent ID from environment variable
+	if agentID := os.Getenv("NANNYAI_AGENT_ID"); agentID != "" {
+		config.AgentID = agentID
 	}
 
 	// Apply defaults for any zero-value HTTP transport settings
@@ -239,6 +345,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("missing required configuration: NANNYAPI_URL (for NannyAPI) must be set")
 	}
 
+	// Validate static token format if set
+	if c.StaticToken != "" && !strings.HasPrefix(c.StaticToken, "nsk_") {
+		return fmt.Errorf("static_token must start with 'nsk_' prefix")
+	}
+
 	if err := c.HTTPTransport.Validate(); err != nil {
 		return err
 	}
@@ -293,5 +404,55 @@ func (c *Config) PrintConfig() {
 	logging.Debug("Configuration:")
 	logging.Debug("  API Base URL: %s", c.APIBaseURL)
 	logging.Debug("  Metrics Interval: %d seconds", c.MetricsInterval)
+	if c.UseStaticToken() {
+		logging.Debug("  Auth Mode: static token (nsk_***)")
+		if c.AgentID != "" {
+			logging.Debug("  Agent ID: %s", c.AgentID)
+		}
+	} else {
+		logging.Debug("  Auth Mode: OAuth2 device flow")
+	}
 	logging.Debug("  Debug: %v", c.Debug)
+}
+
+// SaveAgentID writes the agent_id field back to /etc/nannyagent/config.yaml.
+// This is used after static-token registration to persist the assigned agent ID.
+func (c *Config) SaveAgentID(agentID string) error {
+	c.AgentID = agentID
+
+	configPath := "/etc/nannyagent/config.yaml"
+
+	// Read existing file
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	content := string(data)
+
+	// Check if agent_id line already exists
+	if strings.Contains(content, "agent_id:") {
+		// Replace existing agent_id line
+		lines := strings.Split(content, "\n")
+		for i, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "agent_id:") || strings.HasPrefix(trimmed, "# agent_id:") {
+				lines[i] = fmt.Sprintf("agent_id: \"%s\"", agentID)
+				break
+			}
+		}
+		content = strings.Join(lines, "\n")
+	} else {
+		// Append agent_id
+		if !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		content += fmt.Sprintf("\nagent_id: \"%s\"\n", agentID)
+	}
+
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
 }
