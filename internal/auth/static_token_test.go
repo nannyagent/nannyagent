@@ -338,3 +338,228 @@ func TestStaticTokenAuthManager_ConnectionErrorTracking(t *testing.T) {
 	}
 	sm.mu.RUnlock()
 }
+
+// ── Register tests ─────────────────────────────────────────────────────────
+
+func TestStaticTokenAuthManager_Register_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify auth header
+		if r.Header.Get("Authorization") != "Bearer nsk_reg_token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		// Decode and verify payload
+		var req staticRegisterRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("Failed to decode request body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// Must use register-with-token action, NOT device-auth-start
+		if req.Action != "register-with-token" {
+			t.Errorf("Expected action 'register-with-token', got %q", req.Action)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.Version != "1.0.0" {
+			t.Errorf("Expected version '1.0.0', got %q", req.Version)
+		}
+		if req.Hostname == "" {
+			t.Error("Expected non-empty hostname")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(StaticRegisterResponse{AgentID: "new_agent_xyz"})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		APIBaseURL:    server.URL,
+		StaticToken:   "nsk_reg_token",
+		HTTPTransport: config.DefaultHTTPTransportConfig,
+	}
+	sm := NewStaticTokenAuthManager(cfg)
+
+	resp, err := sm.Register("1.0.0")
+	if err != nil {
+		t.Fatalf("Register() unexpected error: %v", err)
+	}
+	if resp.AgentID != "new_agent_xyz" {
+		t.Errorf("AgentID = %q, want 'new_agent_xyz'", resp.AgentID)
+	}
+}
+
+func TestStaticTokenAuthManager_Register_NoDeviceAuth(t *testing.T) {
+	// Ensure Register does NOT call device-auth-start or authorize.
+	// Any request with those actions should fail this test.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+
+		action, _ := body["action"].(string)
+		if action == "device-auth-start" {
+			t.Error("Register MUST NOT call device-auth-start")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if action == "authorize" {
+			t.Error("Register MUST NOT call authorize")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if action != "register-with-token" {
+			t.Errorf("Expected action 'register-with-token', got %q", action)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(StaticRegisterResponse{AgentID: "agent_no_device_auth"})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		APIBaseURL:    server.URL,
+		StaticToken:   "nsk_test_no_device",
+		HTTPTransport: config.DefaultHTTPTransportConfig,
+	}
+	sm := NewStaticTokenAuthManager(cfg)
+
+	resp, err := sm.Register("0.0.15")
+	if err != nil {
+		t.Fatalf("Register() unexpected error: %v", err)
+	}
+	if resp.AgentID != "agent_no_device_auth" {
+		t.Errorf("AgentID = %q, want 'agent_no_device_auth'", resp.AgentID)
+	}
+}
+
+func TestStaticTokenAuthManager_Register_IncludesSystemInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req staticRegisterRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		if req.Hostname == "" {
+			t.Error("Missing hostname")
+		}
+		if req.OSType == "" {
+			t.Error("Missing os_type")
+		}
+		if req.PlatformFamily == "" {
+			t.Error("Missing platform_family")
+		}
+		if req.Version == "" {
+			t.Error("Missing version")
+		}
+		// primary_ip and kernel_version may be "unknown" in CI but should be present
+		if req.PrimaryIP == "" {
+			t.Error("Missing primary_ip")
+		}
+		if req.KernelVersion == "" {
+			t.Error("Missing kernel_version")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(StaticRegisterResponse{AgentID: "agent_sysinfo"})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		APIBaseURL:    server.URL,
+		StaticToken:   "nsk_sysinfo_test",
+		HTTPTransport: config.DefaultHTTPTransportConfig,
+	}
+	sm := NewStaticTokenAuthManager(cfg)
+
+	_, err := sm.Register("0.0.15")
+	if err != nil {
+		t.Fatalf("Register() unexpected error: %v", err)
+	}
+}
+
+func TestStaticTokenAuthManager_Register_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(StaticRegisterResponse{
+			Error:            "invalid_token",
+			ErrorDescription: "token revoked",
+		})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		APIBaseURL:    server.URL,
+		StaticToken:   "nsk_bad_token",
+		HTTPTransport: config.DefaultHTTPTransportConfig,
+	}
+	sm := NewStaticTokenAuthManager(cfg)
+
+	_, err := sm.Register("1.0.0")
+	if err == nil {
+		t.Fatal("Expected error for error response")
+	}
+	if !contains(err.Error(), "invalid_token") {
+		t.Errorf("Error = %q, expected to contain 'invalid_token'", err.Error())
+	}
+}
+
+func TestStaticTokenAuthManager_Register_MissingAgentID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(StaticRegisterResponse{})
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		APIBaseURL:    server.URL,
+		StaticToken:   "nsk_no_id",
+		HTTPTransport: config.DefaultHTTPTransportConfig,
+	}
+	sm := NewStaticTokenAuthManager(cfg)
+
+	_, err := sm.Register("1.0.0")
+	if err == nil {
+		t.Fatal("Expected error when agent_id is missing from response")
+	}
+	if !contains(err.Error(), "missing agent_id") {
+		t.Errorf("Error = %q, expected to contain 'missing agent_id'", err.Error())
+	}
+}
+
+func TestStaticTokenAuthManager_Register_Unauthorized(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"unauthorized","error_description":"bad token"}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		APIBaseURL:    server.URL,
+		StaticToken:   "nsk_wrong",
+		HTTPTransport: config.DefaultHTTPTransportConfig,
+	}
+	sm := NewStaticTokenAuthManager(cfg)
+
+	_, err := sm.Register("1.0.0")
+	if err == nil {
+		t.Fatal("Expected error for 401 response")
+	}
+}
+
+// contains is a test helper
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
+}
+func containsStr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

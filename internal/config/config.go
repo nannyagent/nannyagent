@@ -3,12 +3,39 @@ package config
 import (
 	"flag"
 	"fmt"
+	"math"
+	"net/url"
 	"os"
 	"strings"
 
 	"nannyagent/internal/logging"
 
 	"gopkg.in/yaml.v3"
+)
+
+// Validation limits — protect against typos, overflow, and unreasonable values.
+const (
+	// Interval bounds (seconds)
+	MinInterval = 5         // 5 seconds
+	MaxInterval = 7 * 86400 // 7 days in seconds (604 800)
+
+	// Token renewal bounds
+	MaxRenewalThresholdDays = 365        // 1 year
+	MaxRenewalIntervalSecs  = 30 * 86400 // 30 days in seconds
+
+	// HTTP transport bounds
+	MaxIdleConns            = 1000
+	MaxIdleConnTimeoutSec   = 3600  // 1 hour
+	MaxResponseHeaderSec    = 300   // 5 minutes
+	MaxRetryDelay           = 86400 // 1 day
+	MaxTransportResetThresh = 100
+
+	// String length limits
+	MaxURLLength       = 2048
+	MaxTokenPathLength = 4096
+	MaxStaticTokenLen  = 512
+	MinStaticTokenLen  = 5 // "nsk_" + at least 1 char
+	MaxAgentIDLength   = 256
 )
 
 type Config struct {
@@ -316,11 +343,20 @@ func (c *Config) validateTokenRenewal() error {
 	if c.TokenRenewalThresholdDays <= 0 {
 		return fmt.Errorf("token_renewal_threshold_days must be > 0 (got %d)", c.TokenRenewalThresholdDays)
 	}
+	if c.TokenRenewalThresholdDays > MaxRenewalThresholdDays {
+		return fmt.Errorf("token_renewal_threshold_days must be <= %d (got %d)", MaxRenewalThresholdDays, c.TokenRenewalThresholdDays)
+	}
 	if c.TokenRenewalCheckIntervalSecs <= 0 {
 		return fmt.Errorf("token_renewal_check_interval_secs must be > 0 (got %d)", c.TokenRenewalCheckIntervalSecs)
 	}
+	if c.TokenRenewalCheckIntervalSecs > MaxRenewalIntervalSecs {
+		return fmt.Errorf("token_renewal_check_interval_secs must be <= %d (got %d)", MaxRenewalIntervalSecs, c.TokenRenewalCheckIntervalSecs)
+	}
 	if c.TokenRenewalRetryIntervalSecs <= 0 {
 		return fmt.Errorf("token_renewal_retry_interval_secs must be > 0 (got %d)", c.TokenRenewalRetryIntervalSecs)
+	}
+	if c.TokenRenewalRetryIntervalSecs > MaxRenewalIntervalSecs {
+		return fmt.Errorf("token_renewal_retry_interval_secs must be <= %d (got %d)", MaxRenewalIntervalSecs, c.TokenRenewalRetryIntervalSecs)
 	}
 	return nil
 }
@@ -339,17 +375,67 @@ func loadYAMLConfig(config *Config, path string) error {
 	return nil
 }
 
-// Validate checks if all required configuration is present
+// Validate checks if all required configuration is present and all values are
+// within acceptable bounds.  This is called after YAML + env loading, and again
+// after CLI flags are merged (via ValidateAfterMerge).
 func (c *Config) Validate() error {
+	// ── Required fields ──────────────────────────────────────────────────
 	if c.APIBaseURL == "" {
 		return fmt.Errorf("missing required configuration: NANNYAPI_URL (for NannyAPI) must be set")
 	}
 
-	// Validate static token format if set
-	if c.StaticToken != "" && !strings.HasPrefix(c.StaticToken, "nsk_") {
-		return fmt.Errorf("static_token must start with 'nsk_' prefix")
+	// ── URL validation ───────────────────────────────────────────────────
+	if err := validateURL(c.APIBaseURL, "nannyapi_url"); err != nil {
+		return err
+	}
+	if c.PortalURL != "" {
+		if err := validateURL(c.PortalURL, "portal_url"); err != nil {
+			return err
+		}
 	}
 
+	// ── Token path ──────────────────────────────────────────────────────
+	if c.TokenPath != "" {
+		if len(c.TokenPath) > MaxTokenPathLength {
+			return fmt.Errorf("token_path is too long (%d chars, max %d)", len(c.TokenPath), MaxTokenPathLength)
+		}
+		if !strings.HasPrefix(c.TokenPath, "/") {
+			return fmt.Errorf("token_path must be an absolute path (got %q)", c.TokenPath)
+		}
+	}
+
+	// ── Static token ────────────────────────────────────────────────────
+	if c.StaticToken != "" {
+		if !strings.HasPrefix(c.StaticToken, "nsk_") {
+			return fmt.Errorf("static_token must start with 'nsk_' prefix")
+		}
+		if len(c.StaticToken) < MinStaticTokenLen {
+			return fmt.Errorf("static_token is too short (must be at least %d characters)", MinStaticTokenLen)
+		}
+		if len(c.StaticToken) > MaxStaticTokenLen {
+			return fmt.Errorf("static_token is too long (%d chars, max %d)", len(c.StaticToken), MaxStaticTokenLen)
+		}
+	}
+
+	// ── Agent ID ────────────────────────────────────────────────────────
+	if c.AgentID != "" {
+		if len(c.AgentID) > MaxAgentIDLength {
+			return fmt.Errorf("agent_id is too long (%d chars, max %d)", len(c.AgentID), MaxAgentIDLength)
+		}
+		if strings.TrimSpace(c.AgentID) == "" {
+			return fmt.Errorf("agent_id must not be blank/whitespace-only")
+		}
+	}
+
+	// ── Intervals ───────────────────────────────────────────────────────
+	if err := validateInterval(c.MetricsInterval, "metrics_interval"); err != nil {
+		return err
+	}
+	if err := validateInterval(c.ProxmoxInterval, "proxmox_interval"); err != nil {
+		return err
+	}
+
+	// ── Subsystem validations ───────────────────────────────────────────
 	if err := c.HTTPTransport.Validate(); err != nil {
 		return err
 	}
@@ -361,13 +447,57 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// ValidateAfterMerge should be called after ApplyCLIFlags to re-validate the
+// final merged configuration.  It is a convenience wrapper around Validate().
+func (c *Config) ValidateAfterMerge() error {
+	return c.Validate()
+}
+
+// validateURL checks that a URL string is well-formed and uses http or https.
+func validateURL(raw, field string) error {
+	if len(raw) > MaxURLLength {
+		return fmt.Errorf("%s is too long (%d chars, max %d)", field, len(raw), MaxURLLength)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s is not a valid URL: %w", field, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%s must use http or https scheme (got %q)", field, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%s is missing a host", field)
+	}
+	return nil
+}
+
+// validateInterval checks that a collection interval is within [MinInterval, MaxInterval].
+func validateInterval(value int, field string) error {
+	if value <= 0 {
+		return fmt.Errorf("%s must be > 0 (got %d)", field, value)
+	}
+	if value < MinInterval {
+		return fmt.Errorf("%s must be >= %d seconds (got %d)", field, MinInterval, value)
+	}
+	if value > MaxInterval {
+		return fmt.Errorf("%s must be <= %d seconds (got %d)", field, MaxInterval, value)
+	}
+	return nil
+}
+
 // Validate checks that HTTPTransportConfig values are sensible and not internally inconsistent.
 func (h *HTTPTransportConfig) Validate() error {
 	if h.InitialRetryDelaySec <= 0 {
 		return fmt.Errorf("http_transport.initial_retry_delay_sec must be > 0 (got %d)", h.InitialRetryDelaySec)
 	}
+	if h.InitialRetryDelaySec > MaxRetryDelay {
+		return fmt.Errorf("http_transport.initial_retry_delay_sec must be <= %d (got %d)", MaxRetryDelay, h.InitialRetryDelaySec)
+	}
 	if h.MaxRetryDelaySec <= 0 {
 		return fmt.Errorf("http_transport.max_retry_delay_sec must be > 0 (got %d)", h.MaxRetryDelaySec)
+	}
+	if h.MaxRetryDelaySec > MaxRetryDelay {
+		return fmt.Errorf("http_transport.max_retry_delay_sec must be <= %d (got %d)", MaxRetryDelay, h.MaxRetryDelaySec)
 	}
 	if h.MaxRetryDelaySec < h.InitialRetryDelaySec {
 		return fmt.Errorf("http_transport.max_retry_delay_sec (%d) must be >= initial_retry_delay_sec (%d)", h.MaxRetryDelaySec, h.InitialRetryDelaySec)
@@ -375,17 +505,40 @@ func (h *HTTPTransportConfig) Validate() error {
 	if h.TransportResetThreshold < 1 {
 		return fmt.Errorf("http_transport.transport_reset_threshold must be >= 1 (got %d)", h.TransportResetThreshold)
 	}
+	if h.TransportResetThreshold > MaxTransportResetThresh {
+		return fmt.Errorf("http_transport.transport_reset_threshold must be <= %d (got %d)", MaxTransportResetThresh, h.TransportResetThreshold)
+	}
 	if h.IdleConnTimeoutSec < 0 {
 		return fmt.Errorf("http_transport.idle_conn_timeout_sec must be >= 0 (got %d)", h.IdleConnTimeoutSec)
+	}
+	if h.IdleConnTimeoutSec > MaxIdleConnTimeoutSec {
+		return fmt.Errorf("http_transport.idle_conn_timeout_sec must be <= %d (got %d)", MaxIdleConnTimeoutSec, h.IdleConnTimeoutSec)
 	}
 	if h.ResponseHeaderTimeoutSec < 0 {
 		return fmt.Errorf("http_transport.response_header_timeout_sec must be >= 0 (got %d)", h.ResponseHeaderTimeoutSec)
 	}
+	if h.ResponseHeaderTimeoutSec > MaxResponseHeaderSec {
+		return fmt.Errorf("http_transport.response_header_timeout_sec must be <= %d (got %d)", MaxResponseHeaderSec, h.ResponseHeaderTimeoutSec)
+	}
 	if h.MaxIdleConns < 0 {
 		return fmt.Errorf("http_transport.max_idle_conns must be >= 0 (got %d)", h.MaxIdleConns)
 	}
+	if h.MaxIdleConns > MaxIdleConns {
+		return fmt.Errorf("http_transport.max_idle_conns must be <= %d (got %d)", MaxIdleConns, h.MaxIdleConns)
+	}
 	if h.MaxIdleConnsPerHost < 0 {
 		return fmt.Errorf("http_transport.max_idle_conns_per_host must be >= 0 (got %d)", h.MaxIdleConnsPerHost)
+	}
+	if h.MaxIdleConnsPerHost > MaxIdleConns {
+		return fmt.Errorf("http_transport.max_idle_conns_per_host must be <= %d (got %d)", MaxIdleConns, h.MaxIdleConnsPerHost)
+	}
+	// Consistency: per-host should not exceed total
+	if h.MaxIdleConns > 0 && h.MaxIdleConnsPerHost > h.MaxIdleConns {
+		return fmt.Errorf("http_transport.max_idle_conns_per_host (%d) must be <= max_idle_conns (%d)", h.MaxIdleConnsPerHost, h.MaxIdleConns)
+	}
+	// Guard against integer overflow when values are used in time.Duration multiplication
+	if h.MaxRetryDelaySec > math.MaxInt64/int(1e9) {
+		return fmt.Errorf("http_transport.max_retry_delay_sec would overflow time.Duration")
 	}
 	return nil
 }

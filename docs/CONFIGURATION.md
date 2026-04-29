@@ -11,6 +11,7 @@
 - [Configuration Priority](#configuration-priority)
 - [Authentication Modes](#authentication-modes)
 - [Command-Line Arguments](#command-line-arguments)
+- [Validation Rules](#validation-rules)
 - [Configuration File](#configuration-file)
 - [Environment Variables](#environment-variables)
 - [Configuration Options](#configuration-options)
@@ -74,8 +75,11 @@ static token as a user credential. Ideal for automation and fleet deployment.
 
 **How it works:**
 
+- Registration sends a single `POST /api/agent` with `action: "register-with-token"`
+  and system information (hostname, OS, IPs, kernel version)
 - The static token (prefixed `nsk_`) is sent as `Authorization: Bearer nsk_...`
-- An `X-Agent-ID` header identifies the specific agent
+- No device authorization flow is triggered — no device codes, user codes, or polling
+- An `X-Agent-ID` header identifies the specific agent after registration
 - No access token refresh or renewal is needed — the static token is long-lived
 - The `agent_id` is auto-saved to `/etc/nannyagent/config.yaml` after registration
 
@@ -125,6 +129,72 @@ sudo nannyagent --daemon --debug --metrics-interval 60
 # One-off diagnosis with custom API URL
 sudo nannyagent --diagnose "disk full on /var" --api-url http://my-api:8090
 ```
+
+## Validation Rules
+
+All configuration values are validated regardless of source (YAML, environment
+variable, or CLI flag). Validation runs twice: once after loading config + env,
+and again after CLI flags are merged. Invalid values cause an immediate, clear
+error message and the agent will not start.
+
+### URLs (`nannyapi_url`, `portal_url`)
+
+| Rule | Detail |
+|------|--------|
+| Scheme | Must be `http` or `https` |
+| Host | Must be present (e.g. `https://` alone is rejected) |
+| Length | Max 2 048 characters |
+| Format | Must be a parseable URL |
+
+### Intervals (`metrics_interval`, `proxmox_interval`)
+
+| Rule | Detail |
+|------|--------|
+| Minimum | 5 seconds |
+| Maximum | 604 800 seconds (7 days) |
+| Negative / zero | Rejected |
+
+### Token Path (`token_path`)
+
+| Rule | Detail |
+|------|--------|
+| Path type | Must be an absolute path (starts with `/`) |
+| Length | Max 4 096 characters |
+
+### Static Token (`static_token`)
+
+| Rule | Detail |
+|------|--------|
+| Prefix | Must start with `nsk_` |
+| Min length | 5 characters (`nsk_` + at least 1) |
+| Max length | 512 characters |
+
+### Agent ID (`agent_id`)
+
+| Rule | Detail |
+|------|--------|
+| Whitespace | Must not be blank / whitespace-only |
+| Max length | 256 characters |
+
+### Token Renewal
+
+| Setting | Min | Max |
+|---------|-----|-----|
+| `token_renewal_threshold_days` | 1 | 365 |
+| `token_renewal_check_interval_secs` | 1 | 2 592 000 (30 days) |
+| `token_renewal_retry_interval_secs` | 1 | 2 592 000 (30 days) |
+
+### HTTP Transport
+
+| Setting | Min | Max |
+|---------|-----|-----|
+| `max_idle_conns` | 0 | 1 000 |
+| `max_idle_conns_per_host` | 0 | 1 000 (and ≤ `max_idle_conns`) |
+| `idle_conn_timeout_sec` | 0 | 3 600 (1 hour) |
+| `response_header_timeout_sec` | 0 | 300 (5 minutes) |
+| `transport_reset_threshold` | 1 | 100 |
+| `initial_retry_delay_sec` | 1 | 86 400 (1 day) |
+| `max_retry_delay_sec` | 1 | 86 400 (and ≥ `initial_retry_delay_sec`) |
 
 ## Configuration File
 

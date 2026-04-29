@@ -208,6 +208,12 @@ func runRegisterCommand(cliFlags *config.CLIFlags) {
 	// Apply CLI flags (highest priority)
 	cfg.ApplyCLIFlags(cliFlags)
 
+	// Re-validate after CLI overrides
+	if err := cfg.ValidateAfterMerge(); err != nil {
+		logging.Error("Invalid configuration: %v", err)
+		os.Exit(1)
+	}
+
 	// Ensure we have a NannyAPI URL
 	if cfg.APIBaseURL == "" {
 		logging.Error("NannyAPI URL not configured")
@@ -230,64 +236,32 @@ func runRegisterCommand(cliFlags *config.CLIFlags) {
 }
 
 // runStaticTokenRegister performs automated registration using a static token.
-// It starts device auth, auto-authorizes via the static token, and registers.
+// It sends a single POST /api/agent with the static token — no device auth flow.
 func runStaticTokenRegister(cfg *config.Config) {
-	logging.Info("Using static token for automated registration")
+	logging.Info("Using static token for direct registration (no device auth)")
 
 	staticAuth := auth.NewStaticTokenAuthManager(cfg)
 
-	// Step 1: Start device authorization (anonymous, no auth needed)
-	oauthMgr := auth.NewAuthManager(cfg)
-	deviceAuth, err := oauthMgr.StartDeviceAuthorization()
-	if err != nil {
-		logging.Error("Failed to start device authorization: %v", err)
-		os.Exit(1)
-	}
-
-	logging.Info("Device code obtained, auto-authorizing with static token...")
-
-	// Step 2: Auto-authorize the device code using the static token.
-	// The static token acts as the user, so we can approve the device code.
-	authorizePayload := fmt.Sprintf(`{"action":"authorize","user_code":"%s"}`, deviceAuth.UserCode)
-	statusCode, body, err := staticAuth.AuthenticatedRequest(
-		"POST",
-		fmt.Sprintf("%s/api/agent", cfg.APIBaseURL),
-		[]byte(authorizePayload),
-		nil,
-	)
-	if err != nil {
-		logging.Error("Failed to auto-authorize device code: %v", err)
-		os.Exit(1)
-	}
-	if statusCode != 200 {
-		logging.Error("Auto-authorize failed (status %d): %s", statusCode, string(body))
-		os.Exit(1)
-	}
-
-	logging.Info("Device code authorized automatically")
-
-	// Step 3: Register the agent (uses device_code, anonymous)
-	tokenResp, err := oauthMgr.PollForTokenAfterAuthorization(deviceAuth.DeviceCode)
+	resp, err := staticAuth.Register(Version)
 	if err != nil {
 		logging.Error("Registration failed: %v", err)
 		os.Exit(1)
 	}
 
-	// Step 4: Save agent_id to config (discard OAuth tokens since we use static token)
 	logging.Info("Registration successful!")
-	logging.Info("Agent ID: %s", tokenResp.AgentID)
+	logging.Info("Agent ID: %s", resp.AgentID)
 
-	if err := cfg.SaveAgentID(tokenResp.AgentID); err != nil {
+	if err := cfg.SaveAgentID(resp.AgentID); err != nil {
 		logging.Warning("Could not save agent_id to config file: %v", err)
-		logging.Info("Please add manually: agent_id: \"%s\" to /etc/nannyagent/config.yaml", tokenResp.AgentID)
+		logging.Info("Please add manually: agent_id: \"%s\" to /etc/nannyagent/config.yaml", resp.AgentID)
 	} else {
 		logging.Info("Agent ID saved to /etc/nannyagent/config.yaml")
 	}
 
-	// Also save the token file so that checkExistingAgentInstance works and
-	// --status can read the agent_id. We save it with just the agent_id.
+	// Save a token marker file so checkExistingAgentInstance recognizes
+	// the agent as registered and --status can read the agent_id.
 	token := &types.AuthToken{
-		AgentID:   tokenResp.AgentID,
+		AgentID:   resp.AgentID,
 		TokenType: "static",
 		ExpiresAt: time.Now().Add(100 * 365 * 24 * time.Hour), // effectively never
 	}
@@ -377,6 +351,12 @@ func runStatusCommand(cliFlags *config.CLIFlags) {
 
 	// Apply CLI flags
 	cfg.ApplyCLIFlags(cliFlags)
+
+	// Re-validate after CLI overrides
+	if err := cfg.ValidateAfterMerge(); err != nil {
+		fmt.Printf("Invalid configuration: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Show API endpoint
 	apiURL := cfg.APIBaseURL
@@ -601,6 +581,12 @@ func main() {
 
 	// Apply CLI flags (highest priority)
 	cfg.ApplyCLIFlags(cliFlags)
+
+	// Re-validate after CLI overrides
+	if err := cfg.ValidateAfterMerge(); err != nil {
+		logging.Error("Invalid configuration: %v", err)
+		os.Exit(1)
+	}
 
 	cfg.PrintConfig()
 

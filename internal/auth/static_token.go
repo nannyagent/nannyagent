@@ -2,12 +2,17 @@ package auth
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/shirou/gopsutil/v3/host"
 
 	"nannyagent/internal/config"
 	"nannyagent/internal/logging"
@@ -84,6 +89,150 @@ func (sm *StaticTokenAuthManager) EnsureAuthenticated() error {
 		return fmt.Errorf("static token not configured")
 	}
 	return nil
+}
+
+// staticRegisterRequest is the payload sent to the backend when registering
+// an agent via static token.  Uses action "register-with-token" and includes
+// system information — no device_code involved.
+type staticRegisterRequest struct {
+	Action         string   `json:"action"`
+	Hostname       string   `json:"hostname"`
+	OSType         string   `json:"os_type"`
+	PlatformFamily string   `json:"platform_family"`
+	Version        string   `json:"version"`
+	PrimaryIP      string   `json:"primary_ip"`
+	KernelVersion  string   `json:"kernel_version"`
+	AllIPs         []string `json:"all_ips"`
+}
+
+// StaticRegisterResponse is the response from a static-token registration.
+type StaticRegisterResponse struct {
+	AgentID          string `json:"agent_id,omitempty"`
+	Error            string `json:"error,omitempty"`
+	ErrorDescription string `json:"error_description,omitempty"`
+}
+
+// Register performs a direct agent registration using the static token.
+// It does NOT start a device authorization flow — instead it sends a single
+// POST /api/agent { action: "register-with-token" } with the static token
+// Authorization header.  The backend creates the agent and returns an agent_id.
+func (sm *StaticTokenAuthManager) Register(version string) (*StaticRegisterResponse, error) {
+	primaryIP, allIPs := staticGetIPs()
+
+	payload := staticRegisterRequest{
+		Action:         "register-with-token",
+		Hostname:       staticGetHostname(),
+		OSType:         staticGetPlatform(),
+		PlatformFamily: staticGetPlatformFamily(),
+		Version:        version,
+		PrimaryIP:      primaryIP,
+		KernelVersion:  staticGetKernelVersion(),
+		AllIPs:         allIPs,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal register request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/agent", sm.baseURL)
+	statusCode, body, err := sm.AuthenticatedRequest("POST", url, jsonData, nil)
+	if err != nil {
+		return nil, fmt.Errorf("registration request failed: %w", err)
+	}
+
+	var resp StaticRegisterResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse registration response (status %d): %w", statusCode, err)
+	}
+
+	if resp.Error != "" {
+		return nil, fmt.Errorf("registration failed: %s — %s", resp.Error, resp.ErrorDescription)
+	}
+
+	if resp.AgentID == "" {
+		return nil, fmt.Errorf("registration response missing agent_id (status %d)", statusCode)
+	}
+
+	return &resp, nil
+}
+
+// ── System-info helpers (package-level, mirror the ones in auth.go) ────────
+
+func staticGetHostname() string {
+	if hostname, err := os.Hostname(); err == nil {
+		return hostname
+	}
+	return "unknown"
+}
+
+func staticGetPlatform() string {
+	platform := os.Getenv("GOOS")
+	if platform == "" {
+		platform = "linux"
+	}
+	return platform
+}
+
+func staticGetPlatformFamily() string {
+	platform, family, _, err := host.PlatformInformation()
+	if err != nil {
+		return "unknown"
+	}
+	if family == "" {
+		return platform
+	}
+	return family
+}
+
+func staticGetKernelVersion() string {
+	version, err := host.KernelVersion()
+	if err != nil {
+		return "unknown"
+	}
+	return version
+}
+
+// staticGetIPs returns the primary non-loopback IP and a list of all IPs.
+func staticGetIPs() (string, []string) {
+	var primaryIP string
+	var allIPs []string
+
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "unknown", nil
+	}
+
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			allIPs = append(allIPs, ip.String())
+			if primaryIP == "" && ip.To4() != nil {
+				primaryIP = ip.String()
+			}
+		}
+	}
+
+	if primaryIP == "" {
+		primaryIP = "unknown"
+	}
+	return primaryIP, allIPs
 }
 
 // AuthenticatedRequest performs an HTTP request with the static token and
