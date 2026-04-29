@@ -9,6 +9,9 @@
 
 - [Overview](#overview)
 - [Configuration Priority](#configuration-priority)
+- [Authentication Modes](#authentication-modes)
+- [Command-Line Arguments](#command-line-arguments)
+- [Validation Rules](#validation-rules)
 - [Configuration File](#configuration-file)
 - [Environment Variables](#environment-variables)
 - [Configuration Options](#configuration-options)
@@ -18,10 +21,11 @@
 
 ## Overview
 
-NannyAgent uses a simple, secure configuration system with two sources:
+NannyAgent uses a simple, secure configuration system with three sources:
 
 1. **YAML configuration file**: `/etc/nannyagent/config.yaml`
 2. **Environment variables**: Override YAML settings
+3. **Command-line arguments**: Highest priority, override both YAML and env vars
 
 This design provides flexibility for different deployment scenarios while maintaining security.
 
@@ -30,9 +34,167 @@ This design provides flexibility for different deployment scenarios while mainta
 Configuration is loaded in the following order (later sources override earlier):
 
 1. `/etc/nannyagent/config.yaml` (system-wide YAML config)
-2. Environment variables (highest priority - overrides YAML)
+2. Environment variables (override YAML)
+3. Command-line arguments (highest priority - override everything)
 
-**That's it!** There are no `.env` files, no local config files, no other configuration locations.
+## Authentication Modes
+
+NannyAgent supports two authentication modes:
+
+### OAuth2 Device Flow (default)
+
+The traditional interactive registration flow. Requires a user to approve the agent
+in the NannyAI portal.
+
+```bash
+sudo nannyagent --register
+# Follow the portal instructions to enter the user code
+```
+
+### Static Token (automated, no user interaction)
+
+Static tokens bypass the entire OAuth2 flow. The agent auto-registers using the
+static token as a user credential. Ideal for automation and fleet deployment.
+
+**Setup:**
+
+1. Create a static token in the NannyAI portal (or via API `create-static-token`)
+2. Add it to `/etc/nannyagent/config.yaml`:
+   ```yaml
+   nannyapi_url: "https://api.nannyai.dev"
+   static_token: "nsk_your_token_here"
+   ```
+3. Register the agent (fully automated, no portal interaction):
+   ```bash
+   sudo nannyagent --register
+   ```
+4. Start the service:
+   ```bash
+   sudo systemctl enable --now nannyagent
+   ```
+
+**How it works:**
+
+- Registration sends a single `POST /api/agent` with `action: "register-with-token"`
+  and system information (hostname, OS, IPs, kernel version)
+- The static token (prefixed `nsk_`) is sent as `Authorization: Bearer nsk_...`
+- No device authorization flow is triggered — no device codes, user codes, or polling
+- An `X-Agent-ID` header identifies the specific agent after registration
+- No access token refresh or renewal is needed — the static token is long-lived
+- The `agent_id` is auto-saved to `/etc/nannyagent/config.yaml` after registration
+
+**Environment variable alternative:**
+
+```bash
+export NANNYAI_STATIC_TOKEN=nsk_your_token_here
+```
+
+> **Security:** The `static_token` is intentionally NOT available as a CLI argument
+> to prevent exposure in the process list. Use the config file or env var only.
+
+## Command-Line Arguments
+
+All YAML configuration options are available as CLI flags with the highest priority.
+
+| Flag | YAML Key | Description |
+|------|----------|-------------|
+| `--api-url <url>` | `nannyapi_url` | NannyAPI endpoint URL |
+| `--portal-url <url>` | `portal_url` | Portal URL for device auth |
+| `--token-path <path>` | `token_path` | Token storage path |
+| `--metrics-interval <secs>` | `metrics_interval` | Metrics collection interval |
+| `--proxmox-interval <secs>` | `proxmox_interval` | Proxmox data collection interval |
+| `--agent-id <id>` | `agent_id` | Agent ID (static token mode) |
+| `--debug` | `debug` | Enable debug mode |
+
+**Commands:**
+
+| Flag | Description |
+|------|-------------|
+| `--register` | Register agent (interactive or automated with static token) |
+| `--status` | Show agent status and connectivity |
+| `--diagnose <issue>` | Run one-off diagnosis |
+| `--daemon` | Run as daemon (systemd mode) |
+| `--version` | Show version |
+| `--help` | Show help |
+
+**Examples:**
+
+```bash
+# Register with a specific API URL
+sudo nannyagent --register --api-url http://localhost:8090
+
+# Run in debug mode with custom metrics interval
+sudo nannyagent --daemon --debug --metrics-interval 60
+
+# One-off diagnosis with custom API URL
+sudo nannyagent --diagnose "disk full on /var" --api-url http://my-api:8090
+```
+
+## Validation Rules
+
+All configuration values are validated regardless of source (YAML, environment
+variable, or CLI flag). Validation runs twice: once after loading config + env,
+and again after CLI flags are merged. Invalid values cause an immediate, clear
+error message and the agent will not start.
+
+### URLs (`nannyapi_url`, `portal_url`)
+
+| Rule | Detail |
+|------|--------|
+| Scheme | Must be `http` or `https` |
+| Host | Must be present (e.g. `https://` alone is rejected) |
+| Length | Max 2 048 characters |
+| Format | Must be a parseable URL |
+
+### Intervals (`metrics_interval`, `proxmox_interval`)
+
+| Rule | Detail |
+|------|--------|
+| Minimum | 5 seconds |
+| Maximum | 604 800 seconds (7 days) |
+| Negative / zero | Rejected |
+
+### Token Path (`token_path`)
+
+| Rule | Detail |
+|------|--------|
+| Path type | Must be an absolute path (starts with `/`) |
+| Length | Max 4 096 characters |
+
+### Static Token (`static_token`)
+
+| Rule | Detail |
+|------|--------|
+| Prefix | Must start with `nsk_` |
+| Min length | 5 characters (`nsk_` + at least 1) |
+| Max length | 512 characters |
+
+### Agent ID (`agent_id`)
+
+| Rule | Detail |
+|------|--------|
+| Whitespace | Must not be blank / whitespace-only |
+| Max length | 256 characters |
+
+### Token Renewal
+
+| Setting | Min | Max |
+|---------|-----|-----|
+| `token_renewal_threshold_days` | 1 | 365 |
+| `token_renewal_check_interval_secs` | 1 | 2 592 000 (30 days) |
+| `token_renewal_retry_interval_secs` | 1 | 2 592 000 (30 days) |
+
+### HTTP Transport
+
+| Setting | Min | Max |
+|---------|-----|-----|
+| `max_idle_conns` | 0 | 1 000 |
+| `max_idle_conns_per_host` | 0 | 1 000 (and ≤ `max_idle_conns`) |
+| `idle_conn_timeout_sec` | 0 | 3 600 (1 hour) |
+| `response_header_timeout_sec` | 0 | 300 (5 minutes) |
+| `transport_reset_threshold` | 1 | 100 |
+| `initial_retry_delay_sec` | 1 | 86 400 (1 day) |
+| `max_retry_delay_sec` | 1 | 86 400 (and ≥ `initial_retry_delay_sec`) |
 
 ## Configuration File
 
@@ -55,6 +217,12 @@ portal_url: https://nannyai.dev
 
 # Optional: Token storage path (default: /var/lib/nannyagent/token.json)
 token_path: /var/lib/nannyagent/token.json
+
+# Optional: Static token for automated auth (bypasses OAuth2)
+# static_token: "nsk_your_static_token_here"
+
+# Optional: Agent ID (auto-populated after registration)
+# agent_id: ""
 
 # Optional: Metrics collection interval in seconds (default: 30)
 metrics_interval: 30
@@ -112,7 +280,7 @@ ls -la /etc/nannyagent/config.yaml
 
 ## Environment Variables
 
-Environment variables have **highest priority** and override values from `/etc/nannyagent/config.yaml`.
+Environment variables override values from `/etc/nannyagent/config.yaml`, but are themselves overridden by command-line arguments (see [Command-Line Arguments](#command-line-arguments)).
 
 ### Supported Variables
 
@@ -121,6 +289,8 @@ Environment variables have **highest priority** and override values from `/etc/n
 | `NANNYAPI_URL` | string | **(required)** | NannyAPI backend URL |
 | `NANNYAI_PORTAL_URL` | string | `https://nannyai.dev` | Portal URL for device auth |
 | `TOKEN_PATH` | string | `/var/lib/nannyagent/token.json` | Token storage location |
+| `NANNYAI_STATIC_TOKEN` | string | *(empty)* | Static API token (nsk_...) |
+| `NANNYAI_AGENT_ID` | string | *(empty)* | Agent ID for static token mode |
 | `DEBUG` | bool | `false` | Enable debug logging (`true` or `1`) |
 
 ### Using Environment Variables

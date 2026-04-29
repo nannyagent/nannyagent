@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"nannyagent/internal/auth"
 	"nannyagent/internal/config"
 	"nannyagent/internal/logging"
 )
@@ -24,7 +23,7 @@ type Manager struct {
 	stopOnce  sync.Once
 }
 
-func NewManager(cfg *config.Config, auth *auth.AuthManager) *Manager {
+func NewManager(cfg *config.Config, auth Authenticator) *Manager {
 	return NewManagerWithCollector(cfg, auth, NewCollector(&RealCommandExecutor{}))
 }
 
