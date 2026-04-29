@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -366,8 +365,14 @@ func (sm *StaticTokenAuthManager) calculateBackoff() time.Duration {
 		return maxDelay
 	}
 
-	backoff := initialDelay * time.Duration(math.Pow(2, float64(attempts)))
-	if backoff > maxDelay || backoff <= 0 {
+	// Use integer shift to avoid float64 overflow in math.Pow.
+	// Clamp to maxDelay before multiplication to prevent time.Duration overflow.
+	shift := time.Duration(1) << uint(attempts)
+	if shift <= 0 || initialDelay > maxDelay/shift {
+		return maxDelay
+	}
+	backoff := initialDelay * shift
+	if backoff > maxDelay {
 		backoff = maxDelay
 	}
 	return backoff

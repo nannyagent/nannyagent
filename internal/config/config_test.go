@@ -368,7 +368,7 @@ func TestUseStaticToken(t *testing.T) {
 		{"valid nsk token", "nsk_abc123def456", true},
 		{"empty token", "", false},
 		{"non-nsk prefix", "invalid_token", false},
-		{"just nsk_", "nsk_", true},
+		{"just nsk_", "nsk_", false},
 		{"partial nsk", "nsk", false},
 	}
 
@@ -546,16 +546,10 @@ static_token: "nsk_abc123"
 		t.Fatalf("Failed to create test config: %v", err)
 	}
 
-	// Simulate SaveAgentID logic (appending)
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("Failed to read: %v", err)
-	}
-	content := string(data)
-	content += "\nagent_id: \"new_agent_123\"\n"
-
-	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
-		t.Fatalf("Failed to write: %v", err)
+	// Call the real saveAgentIDToPath method
+	cfg := &Config{}
+	if err := cfg.saveAgentIDToPath("new_agent_123", configPath); err != nil {
+		t.Fatalf("saveAgentIDToPath() error: %v", err)
 	}
 
 	var loadedCfg Config

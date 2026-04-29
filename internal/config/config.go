@@ -154,9 +154,9 @@ func (c *Config) ApplyCLIFlags(f *CLIFlags) {
 	}
 }
 
-// UseStaticToken returns true if a static token is configured.
+// UseStaticToken returns true if a valid-looking static token is configured.
 func (c *Config) UseStaticToken() bool {
-	return c.StaticToken != "" && strings.HasPrefix(c.StaticToken, "nsk_")
+	return len(c.StaticToken) >= MinStaticTokenLen && strings.HasPrefix(c.StaticToken, "nsk_")
 }
 
 // HTTPTransportConfig contains settings for the HTTP client transport.
@@ -571,9 +571,13 @@ func (c *Config) PrintConfig() {
 // SaveAgentID writes the agent_id field back to /etc/nannyagent/config.yaml.
 // This is used after static-token registration to persist the assigned agent ID.
 func (c *Config) SaveAgentID(agentID string) error {
-	c.AgentID = agentID
+	return c.saveAgentIDToPath(agentID, "/etc/nannyagent/config.yaml")
+}
 
-	configPath := "/etc/nannyagent/config.yaml"
+// saveAgentIDToPath writes the agent_id field to the given config file path.
+// Extracted so unit tests can target a temp file.
+func (c *Config) saveAgentIDToPath(agentID, configPath string) error {
+	c.AgentID = agentID
 
 	// Read existing file
 	data, err := os.ReadFile(configPath)
@@ -583,17 +587,20 @@ func (c *Config) SaveAgentID(agentID string) error {
 
 	content := string(data)
 
-	// Check if agent_id line already exists
-	if strings.Contains(content, "agent_id:") {
-		// Replace existing agent_id line
-		lines := strings.Split(content, "\n")
-		for i, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "agent_id:") || strings.HasPrefix(trimmed, "# agent_id:") {
-				lines[i] = fmt.Sprintf("agent_id: \"%s\"", agentID)
-				break
-			}
+	// Scan lines for an existing agent_id key and replace it.
+	// Track whether replacement occurred to decide whether to append.
+	lines := strings.Split(content, "\n")
+	replaced := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "agent_id:") || strings.HasPrefix(trimmed, "# agent_id:") {
+			lines[i] = fmt.Sprintf("agent_id: \"%s\"", agentID)
+			replaced = true
+			break
 		}
+	}
+
+	if replaced {
 		content = strings.Join(lines, "\n")
 	} else {
 		// Append agent_id

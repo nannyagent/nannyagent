@@ -280,7 +280,7 @@ ls -la /etc/nannyagent/config.yaml
 
 ## Environment Variables
 
-Environment variables have **highest priority** and override values from `/etc/nannyagent/config.yaml`.
+Environment variables override values from `/etc/nannyagent/config.yaml`, but are themselves overridden by command-line arguments (see [Command-Line Arguments](#command-line-arguments)).
 
 ### Supported Variables
 

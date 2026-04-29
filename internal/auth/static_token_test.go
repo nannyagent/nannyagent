@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"nannyagent/internal/config"
@@ -166,7 +167,7 @@ func TestStaticTokenAuthManager_AuthenticatedRequest(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		resp := map[string]interface{}{"success": true, "message": "ok"}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -212,7 +213,7 @@ func TestStaticTokenAuthManager_AuthenticatedRequest_NoAgentID(t *testing.T) {
 		}
 
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 	}))
 	defer server.Close()
 
@@ -240,7 +241,7 @@ func TestStaticTokenAuthManager_AuthenticatedDo(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer server.Close()
 
@@ -257,7 +258,7 @@ func TestStaticTokenAuthManager_AuthenticatedDo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
@@ -372,7 +373,7 @@ func TestStaticTokenAuthManager_Register_Success(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(StaticRegisterResponse{AgentID: "new_agent_xyz"})
+		_ = json.NewEncoder(w).Encode(StaticRegisterResponse{AgentID: "new_agent_xyz"})
 	}))
 	defer server.Close()
 
@@ -397,7 +398,7 @@ func TestStaticTokenAuthManager_Register_NoDeviceAuth(t *testing.T) {
 	// Any request with those actions should fail this test.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]interface{}
-		json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewDecoder(r.Body).Decode(&body)
 
 		action, _ := body["action"].(string)
 		if action == "device-auth-start" {
@@ -417,7 +418,7 @@ func TestStaticTokenAuthManager_Register_NoDeviceAuth(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(StaticRegisterResponse{AgentID: "agent_no_device_auth"})
+		_ = json.NewEncoder(w).Encode(StaticRegisterResponse{AgentID: "agent_no_device_auth"})
 	}))
 	defer server.Close()
 
@@ -440,7 +441,7 @@ func TestStaticTokenAuthManager_Register_NoDeviceAuth(t *testing.T) {
 func TestStaticTokenAuthManager_Register_IncludesSystemInfo(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req staticRegisterRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		if req.Hostname == "" {
 			t.Error("Missing hostname")
@@ -463,7 +464,7 @@ func TestStaticTokenAuthManager_Register_IncludesSystemInfo(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(StaticRegisterResponse{AgentID: "agent_sysinfo"})
+		_ = json.NewEncoder(w).Encode(StaticRegisterResponse{AgentID: "agent_sysinfo"})
 	}))
 	defer server.Close()
 
@@ -484,7 +485,7 @@ func TestStaticTokenAuthManager_Register_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(StaticRegisterResponse{
+		_ = json.NewEncoder(w).Encode(StaticRegisterResponse{
 			Error:            "invalid_token",
 			ErrorDescription: "token revoked",
 		})
@@ -502,7 +503,7 @@ func TestStaticTokenAuthManager_Register_ServerError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error for error response")
 	}
-	if !contains(err.Error(), "invalid_token") {
+	if !strings.Contains(err.Error(), "invalid_token") {
 		t.Errorf("Error = %q, expected to contain 'invalid_token'", err.Error())
 	}
 }
@@ -511,7 +512,7 @@ func TestStaticTokenAuthManager_Register_MissingAgentID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(StaticRegisterResponse{})
+		_ = json.NewEncoder(w).Encode(StaticRegisterResponse{})
 	}))
 	defer server.Close()
 
@@ -526,7 +527,7 @@ func TestStaticTokenAuthManager_Register_MissingAgentID(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error when agent_id is missing from response")
 	}
-	if !contains(err.Error(), "missing agent_id") {
+	if !strings.Contains(err.Error(), "missing agent_id") {
 		t.Errorf("Error = %q, expected to contain 'missing agent_id'", err.Error())
 	}
 }
@@ -534,7 +535,7 @@ func TestStaticTokenAuthManager_Register_MissingAgentID(t *testing.T) {
 func TestStaticTokenAuthManager_Register_Unauthorized(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"unauthorized","error_description":"bad token"}`))
+		_, _ = w.Write([]byte(`{"error":"unauthorized","error_description":"bad token"}`))
 	}))
 	defer server.Close()
 
@@ -549,17 +550,4 @@ func TestStaticTokenAuthManager_Register_Unauthorized(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error for 401 response")
 	}
-}
-
-// contains is a test helper
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
-}
-func containsStr(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

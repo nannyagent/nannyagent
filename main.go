@@ -222,9 +222,6 @@ func runRegisterCommand(cliFlags *config.CLIFlags) {
 		os.Exit(1)
 	}
 
-	// Ensure token path uses hardcoded DataDir
-	cfg.TokenPath = filepath.Join(DataDir, "token.json")
-
 	// ── Static token registration (fully automated, no user interaction) ────
 	if cfg.UseStaticToken() {
 		runStaticTokenRegister(cfg)
@@ -345,7 +342,7 @@ func runStatusCommand(cliFlags *config.CLIFlags) {
 	// Load configuration
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		fmt.Println("Configuration: Not found")
+		fmt.Printf("Configuration error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -372,12 +369,20 @@ func runStatusCommand(cliFlags *config.CLIFlags) {
 		fmt.Println("Auth Mode: OAuth2")
 	}
 
-	// Check if token exists
-	tokenPath := filepath.Join(DataDir, "token.json")
-	if _, err := os.Stat(tokenPath); os.IsNotExist(err) {
-		fmt.Println("Not registered")
-		fmt.Println("\nRegister with: sudo nannyagent --register")
-		os.Exit(1)
+	// Check if agent is registered
+	if cfg.UseStaticToken() && cfg.AgentID != "" {
+		// In static-token mode, a configured agent_id means the agent is registered
+		// even if the token marker file is absent.
+	} else {
+		tokenPath := cfg.TokenPath
+		if tokenPath == "" {
+			tokenPath = filepath.Join(DataDir, "token.json")
+		}
+		if _, err := os.Stat(tokenPath); os.IsNotExist(err) {
+			fmt.Println("Not registered")
+			fmt.Println("\nRegister with: sudo nannyagent --register")
+			os.Exit(1)
+		}
 	}
 
 	if cfg.UseStaticToken() {
@@ -519,6 +524,9 @@ func main() {
 	cliFlags := config.ParseCLIFlags()
 
 	// Also check for commands without -- prefix (for backward compatibility)
+	// NOTE: Go's flag.Parse stops at the first non-flag argument, so config
+	// flags (e.g. --api-url) placed *after* a positional command won't be
+	// parsed.  Users should prefer the --command form for full flag support.
 	if flag.NArg() > 0 {
 		cmd := flag.Arg(0)
 		switch cmd {
