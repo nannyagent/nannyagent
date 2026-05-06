@@ -1,12 +1,41 @@
 package config
 
 import (
+	"flag"
 	"fmt"
+	"math"
+	"net/url"
 	"os"
+	"strings"
 
 	"nannyagent/internal/logging"
 
 	"gopkg.in/yaml.v3"
+)
+
+// Validation limits — protect against typos, overflow, and unreasonable values.
+const (
+	// Interval bounds (seconds)
+	MinInterval = 5         // 5 seconds
+	MaxInterval = 7 * 86400 // 7 days in seconds (604 800)
+
+	// Token renewal bounds
+	MaxRenewalThresholdDays = 365        // 1 year
+	MaxRenewalIntervalSecs  = 30 * 86400 // 30 days in seconds
+
+	// HTTP transport bounds
+	MaxIdleConns            = 1000
+	MaxIdleConnTimeoutSec   = 3600  // 1 hour
+	MaxResponseHeaderSec    = 300   // 5 minutes
+	MaxRetryDelay           = 86400 // 1 day
+	MaxTransportResetThresh = 100
+
+	// String length limits
+	MaxURLLength       = 2048
+	MaxTokenPathLength = 4096
+	MaxStaticTokenLen  = 512
+	MinStaticTokenLen  = 5 // "nsk_" + at least 1 char
+	MaxAgentIDLength   = 256
 )
 
 type Config struct {
@@ -21,6 +50,14 @@ type Config struct {
 	MetricsInterval int    `yaml:"metrics_interval"`
 	ProxmoxInterval int    `yaml:"proxmox_interval"`
 
+	// Static Token Authentication (alternative to OAuth2)
+	// When set, bypasses the OAuth2 device flow entirely.
+	// The token must be a valid NannyAPI static token (prefixed with nsk_).
+	StaticToken string `yaml:"static_token"`
+
+	// Agent ID (required when using static token, auto-populated after registration)
+	AgentID string `yaml:"agent_id"`
+
 	// HTTP Transport Configuration - for tuning connection behavior
 	// These help address HTTP/2 connection issues with long-running agents.
 	// See docs/CONFIGURATION.md for details on when to adjust these.
@@ -34,6 +71,92 @@ type Config struct {
 
 	// Debug/Development
 	Debug bool `yaml:"debug"`
+}
+
+// CLIFlags holds all command-line flag values for merging into Config.
+type CLIFlags struct {
+	// Commands
+	Register bool
+	Status   bool
+	Diagnose string
+	Daemon   bool
+	Version  bool
+	Help     bool
+
+	// Config overrides (nil/empty means not set)
+	APIBaseURL      string
+	PortalURL       string
+	TokenPath       string
+	MetricsInterval int
+	ProxmoxInterval int
+	AgentID         string
+	Debug           bool
+	DebugSet        bool // tracks whether --debug was explicitly passed
+}
+
+// ParseCLIFlags parses command-line arguments and returns structured flags.
+// CLI arguments have the highest priority and override YAML and env config.
+func ParseCLIFlags() *CLIFlags {
+	f := &CLIFlags{}
+
+	flag.BoolVar(&f.Register, "register", false, "Register agent with NannyAI")
+	flag.BoolVar(&f.Status, "status", false, "Show agent status")
+	flag.StringVar(&f.Diagnose, "diagnose", "", "Run one-off diagnosis (e.g., --diagnose \"postgresql is slow\")")
+	flag.BoolVar(&f.Daemon, "daemon", false, "Run as daemon (systemd)")
+	flag.BoolVar(&f.Version, "version", false, "Show version")
+	flag.BoolVar(&f.Help, "help", false, "Show help")
+
+	flag.StringVar(&f.APIBaseURL, "api-url", "", "NannyAPI endpoint URL (overrides config)")
+	flag.StringVar(&f.PortalURL, "portal-url", "", "Portal URL for device authorization")
+	flag.StringVar(&f.TokenPath, "token-path", "", "Token storage path")
+	flag.IntVar(&f.MetricsInterval, "metrics-interval", 0, "Metrics collection interval in seconds")
+	flag.IntVar(&f.ProxmoxInterval, "proxmox-interval", 0, "Proxmox data collection interval in seconds")
+	flag.StringVar(&f.AgentID, "agent-id", "", "Agent ID (for static token registration)")
+	flag.BoolVar(&f.Debug, "debug", false, "Enable debug mode")
+
+	flag.Parse()
+
+	// Track whether --debug was explicitly set
+	flag.Visit(func(fl *flag.Flag) {
+		if fl.Name == "debug" {
+			f.DebugSet = true
+		}
+	})
+
+	return f
+}
+
+// ApplyCLIFlags merges CLI flag values into the config. CLI flags have the
+// highest priority and override both YAML and environment variable settings.
+// Note: static_token is intentionally NOT exposed as a CLI flag for security
+// (it would be visible in the process list). Use config.yaml or env var only.
+func (c *Config) ApplyCLIFlags(f *CLIFlags) {
+	if f.APIBaseURL != "" {
+		c.APIBaseURL = f.APIBaseURL
+	}
+	if f.PortalURL != "" {
+		c.PortalURL = f.PortalURL
+	}
+	if f.TokenPath != "" {
+		c.TokenPath = f.TokenPath
+	}
+	if f.MetricsInterval > 0 {
+		c.MetricsInterval = f.MetricsInterval
+	}
+	if f.ProxmoxInterval > 0 {
+		c.ProxmoxInterval = f.ProxmoxInterval
+	}
+	if f.AgentID != "" {
+		c.AgentID = f.AgentID
+	}
+	if f.DebugSet {
+		c.Debug = f.Debug
+	}
+}
+
+// UseStaticToken returns true if a valid-looking static token is configured.
+func (c *Config) UseStaticToken() bool {
+	return len(c.StaticToken) >= MinStaticTokenLen && strings.HasPrefix(c.StaticToken, "nsk_")
 }
 
 // HTTPTransportConfig contains settings for the HTTP client transport.
@@ -130,7 +253,7 @@ func LoadConfig() (*Config, error) {
 		logging.Warning("No configuration file found at /etc/nannyagent/config.yaml. Using environment variables only.")
 	}
 
-	// Load from environment variables (highest priority - overrides file config)
+	// Load from environment variables (overrides file config, but CLI overrides env)
 	// NannyAPI configuration (primary)
 	if url := os.Getenv("NANNYAPI_URL"); url != "" {
 		config.APIBaseURL = url
@@ -146,6 +269,16 @@ func LoadConfig() (*Config, error) {
 
 	if debug := os.Getenv("DEBUG"); debug == "true" || debug == "1" {
 		config.Debug = true
+	}
+
+	// Static token from environment variable (e.g. from .env or shell)
+	if staticToken := os.Getenv("NANNYAI_STATIC_TOKEN"); staticToken != "" {
+		config.StaticToken = staticToken
+	}
+
+	// Agent ID from environment variable
+	if agentID := os.Getenv("NANNYAI_AGENT_ID"); agentID != "" {
+		config.AgentID = agentID
 	}
 
 	// Apply defaults for any zero-value HTTP transport settings
@@ -210,11 +343,20 @@ func (c *Config) validateTokenRenewal() error {
 	if c.TokenRenewalThresholdDays <= 0 {
 		return fmt.Errorf("token_renewal_threshold_days must be > 0 (got %d)", c.TokenRenewalThresholdDays)
 	}
+	if c.TokenRenewalThresholdDays > MaxRenewalThresholdDays {
+		return fmt.Errorf("token_renewal_threshold_days must be <= %d (got %d)", MaxRenewalThresholdDays, c.TokenRenewalThresholdDays)
+	}
 	if c.TokenRenewalCheckIntervalSecs <= 0 {
 		return fmt.Errorf("token_renewal_check_interval_secs must be > 0 (got %d)", c.TokenRenewalCheckIntervalSecs)
 	}
+	if c.TokenRenewalCheckIntervalSecs > MaxRenewalIntervalSecs {
+		return fmt.Errorf("token_renewal_check_interval_secs must be <= %d (got %d)", MaxRenewalIntervalSecs, c.TokenRenewalCheckIntervalSecs)
+	}
 	if c.TokenRenewalRetryIntervalSecs <= 0 {
 		return fmt.Errorf("token_renewal_retry_interval_secs must be > 0 (got %d)", c.TokenRenewalRetryIntervalSecs)
+	}
+	if c.TokenRenewalRetryIntervalSecs > MaxRenewalIntervalSecs {
+		return fmt.Errorf("token_renewal_retry_interval_secs must be <= %d (got %d)", MaxRenewalIntervalSecs, c.TokenRenewalRetryIntervalSecs)
 	}
 	return nil
 }
@@ -233,12 +375,67 @@ func loadYAMLConfig(config *Config, path string) error {
 	return nil
 }
 
-// Validate checks if all required configuration is present
+// Validate checks if all required configuration is present and all values are
+// within acceptable bounds.  This is called after YAML + env loading, and again
+// after CLI flags are merged (via ValidateAfterMerge).
 func (c *Config) Validate() error {
+	// ── Required fields ──────────────────────────────────────────────────
 	if c.APIBaseURL == "" {
 		return fmt.Errorf("missing required configuration: NANNYAPI_URL (for NannyAPI) must be set")
 	}
 
+	// ── URL validation ───────────────────────────────────────────────────
+	if err := validateURL(c.APIBaseURL, "nannyapi_url"); err != nil {
+		return err
+	}
+	if c.PortalURL != "" {
+		if err := validateURL(c.PortalURL, "portal_url"); err != nil {
+			return err
+		}
+	}
+
+	// ── Token path ──────────────────────────────────────────────────────
+	if c.TokenPath != "" {
+		if len(c.TokenPath) > MaxTokenPathLength {
+			return fmt.Errorf("token_path is too long (%d chars, max %d)", len(c.TokenPath), MaxTokenPathLength)
+		}
+		if !strings.HasPrefix(c.TokenPath, "/") {
+			return fmt.Errorf("token_path must be an absolute path (got %q)", c.TokenPath)
+		}
+	}
+
+	// ── Static token ────────────────────────────────────────────────────
+	if c.StaticToken != "" {
+		if !strings.HasPrefix(c.StaticToken, "nsk_") {
+			return fmt.Errorf("static_token must start with 'nsk_' prefix")
+		}
+		if len(c.StaticToken) < MinStaticTokenLen {
+			return fmt.Errorf("static_token is too short (must be at least %d characters)", MinStaticTokenLen)
+		}
+		if len(c.StaticToken) > MaxStaticTokenLen {
+			return fmt.Errorf("static_token is too long (%d chars, max %d)", len(c.StaticToken), MaxStaticTokenLen)
+		}
+	}
+
+	// ── Agent ID ────────────────────────────────────────────────────────
+	if c.AgentID != "" {
+		if len(c.AgentID) > MaxAgentIDLength {
+			return fmt.Errorf("agent_id is too long (%d chars, max %d)", len(c.AgentID), MaxAgentIDLength)
+		}
+		if strings.TrimSpace(c.AgentID) == "" {
+			return fmt.Errorf("agent_id must not be blank/whitespace-only")
+		}
+	}
+
+	// ── Intervals ───────────────────────────────────────────────────────
+	if err := validateInterval(c.MetricsInterval, "metrics_interval"); err != nil {
+		return err
+	}
+	if err := validateInterval(c.ProxmoxInterval, "proxmox_interval"); err != nil {
+		return err
+	}
+
+	// ── Subsystem validations ───────────────────────────────────────────
 	if err := c.HTTPTransport.Validate(); err != nil {
 		return err
 	}
@@ -250,13 +447,57 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// ValidateAfterMerge should be called after ApplyCLIFlags to re-validate the
+// final merged configuration.  It is a convenience wrapper around Validate().
+func (c *Config) ValidateAfterMerge() error {
+	return c.Validate()
+}
+
+// validateURL checks that a URL string is well-formed and uses http or https.
+func validateURL(raw, field string) error {
+	if len(raw) > MaxURLLength {
+		return fmt.Errorf("%s is too long (%d chars, max %d)", field, len(raw), MaxURLLength)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s is not a valid URL: %w", field, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%s must use http or https scheme (got %q)", field, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%s is missing a host", field)
+	}
+	return nil
+}
+
+// validateInterval checks that a collection interval is within [MinInterval, MaxInterval].
+func validateInterval(value int, field string) error {
+	if value <= 0 {
+		return fmt.Errorf("%s must be > 0 (got %d)", field, value)
+	}
+	if value < MinInterval {
+		return fmt.Errorf("%s must be >= %d seconds (got %d)", field, MinInterval, value)
+	}
+	if value > MaxInterval {
+		return fmt.Errorf("%s must be <= %d seconds (got %d)", field, MaxInterval, value)
+	}
+	return nil
+}
+
 // Validate checks that HTTPTransportConfig values are sensible and not internally inconsistent.
 func (h *HTTPTransportConfig) Validate() error {
 	if h.InitialRetryDelaySec <= 0 {
 		return fmt.Errorf("http_transport.initial_retry_delay_sec must be > 0 (got %d)", h.InitialRetryDelaySec)
 	}
+	if h.InitialRetryDelaySec > MaxRetryDelay {
+		return fmt.Errorf("http_transport.initial_retry_delay_sec must be <= %d (got %d)", MaxRetryDelay, h.InitialRetryDelaySec)
+	}
 	if h.MaxRetryDelaySec <= 0 {
 		return fmt.Errorf("http_transport.max_retry_delay_sec must be > 0 (got %d)", h.MaxRetryDelaySec)
+	}
+	if h.MaxRetryDelaySec > MaxRetryDelay {
+		return fmt.Errorf("http_transport.max_retry_delay_sec must be <= %d (got %d)", MaxRetryDelay, h.MaxRetryDelaySec)
 	}
 	if h.MaxRetryDelaySec < h.InitialRetryDelaySec {
 		return fmt.Errorf("http_transport.max_retry_delay_sec (%d) must be >= initial_retry_delay_sec (%d)", h.MaxRetryDelaySec, h.InitialRetryDelaySec)
@@ -264,17 +505,40 @@ func (h *HTTPTransportConfig) Validate() error {
 	if h.TransportResetThreshold < 1 {
 		return fmt.Errorf("http_transport.transport_reset_threshold must be >= 1 (got %d)", h.TransportResetThreshold)
 	}
+	if h.TransportResetThreshold > MaxTransportResetThresh {
+		return fmt.Errorf("http_transport.transport_reset_threshold must be <= %d (got %d)", MaxTransportResetThresh, h.TransportResetThreshold)
+	}
 	if h.IdleConnTimeoutSec < 0 {
 		return fmt.Errorf("http_transport.idle_conn_timeout_sec must be >= 0 (got %d)", h.IdleConnTimeoutSec)
+	}
+	if h.IdleConnTimeoutSec > MaxIdleConnTimeoutSec {
+		return fmt.Errorf("http_transport.idle_conn_timeout_sec must be <= %d (got %d)", MaxIdleConnTimeoutSec, h.IdleConnTimeoutSec)
 	}
 	if h.ResponseHeaderTimeoutSec < 0 {
 		return fmt.Errorf("http_transport.response_header_timeout_sec must be >= 0 (got %d)", h.ResponseHeaderTimeoutSec)
 	}
+	if h.ResponseHeaderTimeoutSec > MaxResponseHeaderSec {
+		return fmt.Errorf("http_transport.response_header_timeout_sec must be <= %d (got %d)", MaxResponseHeaderSec, h.ResponseHeaderTimeoutSec)
+	}
 	if h.MaxIdleConns < 0 {
 		return fmt.Errorf("http_transport.max_idle_conns must be >= 0 (got %d)", h.MaxIdleConns)
 	}
+	if h.MaxIdleConns > MaxIdleConns {
+		return fmt.Errorf("http_transport.max_idle_conns must be <= %d (got %d)", MaxIdleConns, h.MaxIdleConns)
+	}
 	if h.MaxIdleConnsPerHost < 0 {
 		return fmt.Errorf("http_transport.max_idle_conns_per_host must be >= 0 (got %d)", h.MaxIdleConnsPerHost)
+	}
+	if h.MaxIdleConnsPerHost > MaxIdleConns {
+		return fmt.Errorf("http_transport.max_idle_conns_per_host must be <= %d (got %d)", MaxIdleConns, h.MaxIdleConnsPerHost)
+	}
+	// Consistency: per-host should not exceed total
+	if h.MaxIdleConns > 0 && h.MaxIdleConnsPerHost > h.MaxIdleConns {
+		return fmt.Errorf("http_transport.max_idle_conns_per_host (%d) must be <= max_idle_conns (%d)", h.MaxIdleConnsPerHost, h.MaxIdleConns)
+	}
+	// Guard against integer overflow when values are used in time.Duration multiplication
+	if h.MaxRetryDelaySec > math.MaxInt64/int(1e9) {
+		return fmt.Errorf("http_transport.max_retry_delay_sec would overflow time.Duration")
 	}
 	return nil
 }
@@ -293,5 +557,62 @@ func (c *Config) PrintConfig() {
 	logging.Debug("Configuration:")
 	logging.Debug("  API Base URL: %s", c.APIBaseURL)
 	logging.Debug("  Metrics Interval: %d seconds", c.MetricsInterval)
+	if c.UseStaticToken() {
+		logging.Debug("  Auth Mode: static token (nsk_***)")
+		if c.AgentID != "" {
+			logging.Debug("  Agent ID: %s", c.AgentID)
+		}
+	} else {
+		logging.Debug("  Auth Mode: OAuth2 device flow")
+	}
 	logging.Debug("  Debug: %v", c.Debug)
+}
+
+// SaveAgentID writes the agent_id field back to /etc/nannyagent/config.yaml.
+// This is used after static-token registration to persist the assigned agent ID.
+func (c *Config) SaveAgentID(agentID string) error {
+	return c.saveAgentIDToPath(agentID, "/etc/nannyagent/config.yaml")
+}
+
+// saveAgentIDToPath writes the agent_id field to the given config file path.
+// Extracted so unit tests can target a temp file.
+func (c *Config) saveAgentIDToPath(agentID, configPath string) error {
+	c.AgentID = agentID
+
+	// Read existing file
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	content := string(data)
+
+	// Scan lines for an existing agent_id key and replace it.
+	// Track whether replacement occurred to decide whether to append.
+	lines := strings.Split(content, "\n")
+	replaced := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "agent_id:") || strings.HasPrefix(trimmed, "# agent_id:") {
+			lines[i] = fmt.Sprintf("agent_id: \"%s\"", agentID)
+			replaced = true
+			break
+		}
+	}
+
+	if replaced {
+		content = strings.Join(lines, "\n")
+	} else {
+		// Append agent_id
+		if !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		content += fmt.Sprintf("\nagent_id: \"%s\"\n", agentID)
+	}
+
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
 }

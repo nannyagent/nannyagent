@@ -14,6 +14,28 @@ portal_url: "https://nannyai.dev"
 # Default: /var/lib/nannyagent/token.json
 token_path: "/var/lib/nannyagent/token.json"
 
+# ─── Static Token Authentication (alternative to OAuth2) ────────────────────
+#
+# Static tokens bypass the entire OAuth2 device flow. When set, the agent uses
+# this token directly as a Bearer credential on every API request, with no
+# access token refresh or renewal needed.
+#
+# How to use:
+#   1. Create a static token in the NannyAI portal (or via API)
+#   2. Set it here (must start with nsk_)
+#   3. Run: sudo nannyagent --register
+#      The agent will auto-register without user interaction
+#   4. Start the agent normally: sudo systemctl enable --now nannyagent
+#
+# The token can also be set via NANNYAI_STATIC_TOKEN environment variable.
+# Static tokens are NOT exposed as CLI arguments for security (process list).
+#
+# static_token: "nsk_your_static_token_here"
+
+# Agent ID (auto-populated after registration, do not set manually unless
+# you know the agent ID from a previous registration)
+# agent_id: ""
+
 # Node metrics collection interval in seconds (optional)
 # Default: 30
 metrics_interval: 30

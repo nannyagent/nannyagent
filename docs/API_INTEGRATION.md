@@ -223,6 +223,45 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 Content-Type: application/json
 ```
 
+### Static Token Authentication (alternative)
+
+Static tokens (`nsk_*`) bypass the device auth flow entirely. The agent sends a
+single registration request and subsequently authenticates all API calls with the
+static token.
+
+**Registration (no device auth):**
+
+```bash
+curl -X POST https://api.nannyai.dev/api/agent \
+  -H "Authorization: Bearer nsk_your_static_token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "register-with-token",
+    "hostname": "prod-web-01",
+    "os_type": "linux",
+    "platform_family": "debian",
+    "version": "0.0.15",
+    "primary_ip": "10.0.1.5",
+    "kernel_version": "5.15.0-56-generic",
+    "all_ips": ["10.0.1.5", "172.17.0.1"]
+  }'
+```
+
+**Response:**
+```json
+{
+  "agent_id": "aqvdtvpuoyvji6t"
+}
+```
+
+**Subsequent authenticated requests:**
+
+```http
+Authorization: Bearer nsk_your_static_token
+X-Agent-ID: aqvdtvpuoyvji6t
+Content-Type: application/json
+```
+
 ## REST API Endpoints
 
 ### Health Check
