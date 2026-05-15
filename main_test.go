@@ -1,7 +1,11 @@
 package main
 
 import (
+	"strings"
 	"testing"
+
+	"nannyagent/internal/app"
+	"nannyagent/internal/config"
 )
 
 func TestValidateDiagnosisPrompt(t *testing.T) {
@@ -77,7 +81,7 @@ func TestValidateDiagnosisPrompt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateDiagnosisPrompt(tt.prompt)
+			err := app.ValidateDiagnosisPrompt(tt.prompt)
 
 			if tt.wantErr {
 				if err == nil {
@@ -96,6 +100,79 @@ func TestValidateDiagnosisPrompt(t *testing.T) {
 	}
 }
 
+func TestVersionText(t *testing.T) {
+	output := app.VersionText("1.2.3")
+	if !strings.Contains(output, "nannyagent version 1.2.3") {
+		t.Fatalf("VersionText missing version: %q", output)
+	}
+	if !strings.Contains(output, "Linux diagnostic agent with eBPF capabilities") {
+		t.Fatalf("VersionText missing description: %q", output)
+	}
+}
+
+func TestHelpText(t *testing.T) {
+	output := app.HelpText("nannyagent", "1.2.3")
+	required := []string{
+		"Version: 1.2.3",
+		"nannyagent [COMMAND] [OPTIONS]",
+		"--register",
+		"--status",
+		"Documentation: https://nannyai.dev/documentation",
+	}
+	for _, item := range required {
+		if !strings.Contains(output, item) {
+			t.Fatalf("HelpText missing %q in %q", item, output)
+		}
+	}
+}
+
+func TestApplyLegacyPositionalCommands(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		check func(t *testing.T, flags *config.CLIFlags, warnings []string)
+	}{
+		{
+			name: "register",
+			args: []string{"register"},
+			check: func(t *testing.T, flags *config.CLIFlags, warnings []string) {
+				if !flags.Register || len(warnings) != 1 {
+					t.Fatalf("expected register flag and warning, got %+v %v", flags, warnings)
+				}
+			},
+		},
+		{
+			name: "diagnose",
+			args: []string{"diagnose", "disk full on root"},
+			check: func(t *testing.T, flags *config.CLIFlags, warnings []string) {
+				if flags.Diagnose != "disk full on root" {
+					t.Fatalf("expected diagnose prompt to be set, got %q", flags.Diagnose)
+				}
+				if len(warnings) != 1 {
+					t.Fatalf("expected warning, got %v", warnings)
+				}
+			},
+		},
+		{
+			name: "unknown",
+			args: []string{"noop"},
+			check: func(t *testing.T, flags *config.CLIFlags, warnings []string) {
+				if len(warnings) != 0 {
+					t.Fatalf("expected no warnings, got %v", warnings)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags := &config.CLIFlags{}
+			warnings := app.ApplyLegacyPositionalCommands(flags, tt.args)
+			tt.check(t, flags, warnings)
+		})
+	}
+}
+
 // TestConfigLoadingConstraints verifies that we only support specific config sources
 // This is a conceptual test since we can't easily mock the file system for main.go functions directly
 // without refactoring main.go to accept a config loader interface.
@@ -104,9 +181,44 @@ func TestValidateDiagnosisPrompt(t *testing.T) {
 // Here we can add tests for other main.go utility functions.
 
 func TestCheckKernelVersionCompatibility_Parsing(t *testing.T) {
-	// We can't easily test the actual checkKernelVersionCompatibility function because it calls os.Exit
-	// and exec.Command. Ideally, we would refactor it to take dependencies or return error.
-	// For now, we'll skip this as it requires significant refactoring of main.go.
+	major, err := app.KernelMajorVersion("5.15.0-56-generic")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if major != 5 {
+		t.Fatalf("expected major version 5, got %d", major)
+	}
+}
+
+func TestKernelMajorVersionErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{name: "unknown", text: "unknown", want: "cannot determine kernel version"},
+		{name: "invalid", text: "x.15.0", want: "cannot parse major kernel version: x"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := app.KernelMajorVersion(tt.text)
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("KernelMajorVersion(%q) error = %v, want %q", tt.text, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveSystemdServiceStatus(t *testing.T) {
+	status, available, err := app.ResolveSystemdServiceStatus(
+		func(string) (string, error) { return "/bin/systemctl", nil },
+		func(name string, args ...string) ([]byte, error) { return []byte("active\n"), nil },
+		"nannyagent",
+	)
+	if err != nil || !available || status != "Service running" {
+		t.Fatalf("ResolveSystemdServiceStatus() = (%q, %v, %v)", status, available, err)
+	}
 }
 
 func TestValidateDiagnosisPrompt_RealWorldExamples(t *testing.T) {
@@ -125,7 +237,7 @@ func TestValidateDiagnosisPrompt_RealWorldExamples(t *testing.T) {
 
 	for _, prompt := range validPrompts {
 		t.Run("Valid: "+prompt, func(t *testing.T) {
-			err := validateDiagnosisPrompt(prompt)
+			err := app.ValidateDiagnosisPrompt(prompt)
 			if err != nil {
 				t.Errorf("validateDiagnosisPrompt(%q) unexpected error = %v", prompt, err)
 			}
@@ -143,7 +255,7 @@ func TestValidateDiagnosisPrompt_RealWorldExamples(t *testing.T) {
 
 	for prompt, expectedErr := range invalidPrompts {
 		t.Run("Invalid: "+prompt, func(t *testing.T) {
-			err := validateDiagnosisPrompt(prompt)
+			err := app.ValidateDiagnosisPrompt(prompt)
 			if err == nil {
 				t.Errorf("validateDiagnosisPrompt(%q) expected error but got nil", prompt)
 				return

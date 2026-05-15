@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"nannyagent/internal/logging"
+	"nannyagent/internal/nannyapi"
 	"nannyagent/internal/types"
 )
 
@@ -101,12 +102,30 @@ func (c *Client) Start() {
 			Timeout: 0, // No timeout for long-lived connections
 		}
 
-		logging.Debug("Connecting to SSE at %s/api/realtime...", c.baseURL)
-		resp, err := customClient.Get(c.baseURL + "/api/realtime")
+		logging.Debug("Connecting to SSE at %s%s...", c.baseURL, nannyapi.EndpointRealtime)
+		req, err := http.NewRequest(http.MethodGet, c.baseURL+nannyapi.EndpointRealtime, nil)
+		if err != nil {
+			consecutiveFailures++
+			backoff := CalculateBackoff(consecutiveFailures)
+			logging.Warning("Failed to create realtime request: %v", err)
+			time.Sleep(backoff)
+			continue
+		}
+		req.Header.Set(nannyapi.HeaderAuthorization, nannyapi.BearerPrefix+accessToken)
+
+		resp, err := customClient.Do(req)
 		if err != nil {
 			consecutiveFailures++
 			backoff := CalculateBackoff(consecutiveFailures)
 			logging.Warning("Connection error (attempt %d): %v, retrying in %v", consecutiveFailures, err, backoff)
+			time.Sleep(backoff)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			consecutiveFailures++
+			backoff := CalculateBackoff(consecutiveFailures)
+			logging.Warning("Realtime handshake failed with status %d, retrying in %v", resp.StatusCode, backoff)
 			time.Sleep(backoff)
 			continue
 		}
@@ -157,13 +176,32 @@ func (c *Client) Start() {
 			"subscriptions": []string{"investigations", "patch_operations", "reboot_operations"},
 		})
 
-		req, _ := http.NewRequest("POST", c.baseURL+"/api/realtime", bytes.NewBuffer(subData))
-		req.Header.Set("Authorization", "Bearer "+accessToken)
-		req.Header.Set("Content-Type", "application/json")
+		req, err = http.NewRequest(http.MethodPost, c.baseURL+nannyapi.EndpointRealtime, bytes.NewBuffer(subData))
+		if err != nil {
+			logging.Warning("Failed to create realtime subscription request: %v", err)
+			_ = resp.Body.Close()
+			consecutiveFailures++
+			backoff := CalculateBackoff(consecutiveFailures)
+			logging.Debug("Retrying in %v...", backoff)
+			time.Sleep(backoff)
+			continue
+		}
+		req.Header.Set(nannyapi.HeaderAuthorization, nannyapi.BearerPrefix+accessToken)
+		req.Header.Set(nannyapi.HeaderContentType, nannyapi.ContentTypeJSON)
 
 		subResp, err := http.DefaultClient.Do(req)
-		if err != nil || subResp.StatusCode != 204 {
-			logging.Warning("Subscription failed: %v", err)
+		if err != nil {
+			logging.Warning("Realtime subscription request failed: %v", err)
+			_ = resp.Body.Close()
+			consecutiveFailures++
+			backoff := CalculateBackoff(consecutiveFailures)
+			logging.Debug("Retrying in %v...", backoff)
+			time.Sleep(backoff)
+			continue
+		}
+		_ = subResp.Body.Close()
+		if subResp.StatusCode != http.StatusNoContent {
+			logging.Warning("Realtime subscription failed with status %d", subResp.StatusCode)
 			_ = resp.Body.Close()
 			consecutiveFailures++
 			backoff := CalculateBackoff(consecutiveFailures)
@@ -205,7 +243,7 @@ func (c *Client) Start() {
 				var msg RealtimeMessage
 				if err := json.Unmarshal([]byte(msgJSON), &msg); err == nil {
 					// Check if this is a reboot operation
-					if msg.Action == "create" {
+					if msg.Action == nannyapi.ActionCreate {
 						if c.handleRebootOperation(msg) {
 							continue
 						}
@@ -219,7 +257,8 @@ func (c *Client) Start() {
 						c.handleInvestigation(msg)
 					}
 				} else {
-					logging.Error("JSON Error: %v", err)
+					logging.Warning("Received invalid realtime payload; ignoring message")
+					logging.Debug("Invalid realtime payload: %s", msgJSON)
 				}
 			}
 		}

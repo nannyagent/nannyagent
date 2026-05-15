@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"nannyagent/internal/config"
+	"nannyagent/internal/nannyapi"
 )
 
 func TestNewStaticTokenAuthManager(t *testing.T) {
@@ -151,15 +152,15 @@ func TestStaticTokenAuthManager_AuthenticatedRequest(t *testing.T) {
 	// Create a test HTTP server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify authorization header
-		authHeader := r.Header.Get("Authorization")
-		if authHeader != "Bearer nsk_test_token_123" {
+		authHeader := r.Header.Get(nannyapi.HeaderAuthorization)
+		if authHeader != nannyapi.BearerPrefix+"nsk_test_token_123" {
 			t.Errorf("Expected Bearer nsk_test_token_123, got %s", authHeader)
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 
 		// Verify X-Agent-ID header
-		agentID := r.Header.Get("X-Agent-ID")
+		agentID := r.Header.Get(nannyapi.HeaderAgentID)
 		if agentID != "agent_abc" {
 			t.Errorf("Expected X-Agent-ID agent_abc, got %s", agentID)
 		}
@@ -180,7 +181,7 @@ func TestStaticTokenAuthManager_AuthenticatedRequest(t *testing.T) {
 
 	sm := NewStaticTokenAuthManager(cfg)
 
-	statusCode, body, err := sm.AuthenticatedRequest("POST", server.URL+"/api/agent", []byte(`{"action":"ingest-metrics"}`), nil)
+	statusCode, body, err := sm.AuthenticatedRequest("POST", server.URL+nannyapi.EndpointAgent, []byte(`{"action":"ingest-metrics"}`), nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -200,14 +201,14 @@ func TestStaticTokenAuthManager_AuthenticatedRequest(t *testing.T) {
 func TestStaticTokenAuthManager_AuthenticatedRequest_NoAgentID(t *testing.T) {
 	// Verify that requests work without X-Agent-ID when agent_id is not set
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader != "Bearer nsk_test_token" {
+		authHeader := r.Header.Get(nannyapi.HeaderAuthorization)
+		if authHeader != nannyapi.BearerPrefix+"nsk_test_token" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 
 		// X-Agent-ID should NOT be present
-		agentID := r.Header.Get("X-Agent-ID")
+		agentID := r.Header.Get(nannyapi.HeaderAgentID)
 		if agentID != "" {
 			t.Errorf("Expected no X-Agent-ID header, got %s", agentID)
 		}
@@ -225,7 +226,7 @@ func TestStaticTokenAuthManager_AuthenticatedRequest_NoAgentID(t *testing.T) {
 
 	sm := NewStaticTokenAuthManager(cfg)
 
-	statusCode, _, err := sm.AuthenticatedRequest("POST", server.URL+"/api/agent", []byte(`{}`), nil)
+	statusCode, _, err := sm.AuthenticatedRequest("POST", server.URL+nannyapi.EndpointAgent, []byte(`{}`), nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -236,7 +237,7 @@ func TestStaticTokenAuthManager_AuthenticatedRequest_NoAgentID(t *testing.T) {
 
 func TestStaticTokenAuthManager_AuthenticatedDo(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer nsk_do_test" {
+		if r.Header.Get(nannyapi.HeaderAuthorization) != nannyapi.BearerPrefix+"nsk_do_test" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -345,7 +346,7 @@ func TestStaticTokenAuthManager_ConnectionErrorTracking(t *testing.T) {
 func TestStaticTokenAuthManager_Register_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify auth header
-		if r.Header.Get("Authorization") != "Bearer nsk_reg_token" {
+		if r.Header.Get(nannyapi.HeaderAuthorization) != nannyapi.BearerPrefix+"nsk_reg_token" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -359,7 +360,7 @@ func TestStaticTokenAuthManager_Register_Success(t *testing.T) {
 		}
 
 		// Must use register-with-token action, NOT device-auth-start
-		if req.Action != "register-with-token" {
+		if req.Action != nannyapi.ActionRegisterWithToken {
 			t.Errorf("Expected action 'register-with-token', got %q", req.Action)
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -401,17 +402,17 @@ func TestStaticTokenAuthManager_Register_NoDeviceAuth(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 
 		action, _ := body["action"].(string)
-		if action == "device-auth-start" {
+		if action == nannyapi.ActionDeviceAuthStart {
 			t.Error("Register MUST NOT call device-auth-start")
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if action == "authorize" {
+		if action == nannyapi.ActionAuthorize {
 			t.Error("Register MUST NOT call authorize")
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if action != "register-with-token" {
+		if action != nannyapi.ActionRegisterWithToken {
 			t.Errorf("Expected action 'register-with-token', got %q", action)
 			w.WriteHeader(http.StatusBadRequest)
 			return

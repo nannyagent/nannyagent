@@ -2,13 +2,19 @@ package system
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
-	"time"
 
-	"nannyagent/internal/executor"
-	"nannyagent/internal/types"
+	"github.com/shirou/gopsutil/v3/disk"
+	"github.com/shirou/gopsutil/v3/host"
+	"github.com/shirou/gopsutil/v3/load"
+	"github.com/shirou/gopsutil/v3/mem"
+
+	"nannyagent/internal/hostinfo"
 )
 
 // SystemInfo represents basic system information
@@ -27,50 +33,138 @@ type SystemInfo struct {
 
 // GatherSystemInfo collects basic system information
 func GatherSystemInfo() *SystemInfo {
-	info := &SystemInfo{}
-	executor := executor.NewCommandExecutor(5 * time.Second)
-
-	// Basic system info
-	if result := executor.Execute(types.Command{ID: "hostname", Command: "hostname"}); result.ExitCode == 0 {
-		info.Hostname = strings.TrimSpace(result.Output)
+	metadata := hostinfo.Collect()
+	info := &SystemInfo{
+		Hostname:     metadata.Hostname,
+		OS:           metadata.Platform,
+		Kernel:       metadata.KernelVersion,
+		Architecture: runtime.GOARCH,
+		CPUCores:     strconv.Itoa(runtime.NumCPU()),
+		Memory:       "unknown",
+		Uptime:       "unknown",
+		PrivateIPs:   getPrivateIPs(),
+		LoadAverage:  "unknown",
+		DiskUsage:    "unknown",
 	}
 
-	if result := executor.Execute(types.Command{ID: "os", Command: "lsb_release -d 2>/dev/null | cut -f2 || cat /etc/os-release | grep PRETTY_NAME | cut -d'=' -f2 | tr -d '\"'"}); result.ExitCode == 0 {
-		info.OS = strings.TrimSpace(result.Output)
+	if hostInfo, err := host.Info(); err == nil {
+		if hostInfo.Hostname != "" {
+			info.Hostname = hostInfo.Hostname
+		}
+		if description := formatOS(hostInfo.Platform, hostInfo.PlatformVersion); description != "" {
+			info.OS = description
+		}
+		if hostInfo.KernelVersion != "" {
+			info.Kernel = hostInfo.KernelVersion
+		}
+		if hostInfo.KernelArch != "" {
+			info.Architecture = hostInfo.KernelArch
+		}
+		if hostInfo.Uptime > 0 {
+			info.Uptime = formatUptime(hostInfo.Uptime)
+		}
 	}
 
-	if result := executor.Execute(types.Command{ID: "kernel", Command: "uname -r"}); result.ExitCode == 0 {
-		info.Kernel = strings.TrimSpace(result.Output)
+	if virtualMemory, err := mem.VirtualMemory(); err == nil && virtualMemory.Total > 0 {
+		info.Memory = formatBytes(virtualMemory.Total)
 	}
 
-	if result := executor.Execute(types.Command{ID: "arch", Command: "uname -m"}); result.ExitCode == 0 {
-		info.Architecture = strings.TrimSpace(result.Output)
+	if averages, err := load.Avg(); err == nil {
+		info.LoadAverage = fmt.Sprintf("%.2f, %.2f, %.2f", averages.Load1, averages.Load5, averages.Load15)
 	}
 
-	if result := executor.Execute(types.Command{ID: "cores", Command: "nproc"}); result.ExitCode == 0 {
-		info.CPUCores = strings.TrimSpace(result.Output)
+	if usage, err := disk.Usage("/"); err == nil && usage.Total > 0 {
+		info.DiskUsage = fmt.Sprintf("Root: %s/%s (%s used)", formatBytes(usage.Used), formatBytes(usage.Total), formatPercent(usage.UsedPercent))
 	}
-
-	if result := executor.Execute(types.Command{ID: "memory", Command: "free -h | grep Mem | awk '{print $2}'"}); result.ExitCode == 0 {
-		info.Memory = strings.TrimSpace(result.Output)
-	}
-
-	if result := executor.Execute(types.Command{ID: "uptime", Command: "uptime -p"}); result.ExitCode == 0 {
-		info.Uptime = strings.TrimSpace(result.Output)
-	}
-
-	if result := executor.Execute(types.Command{ID: "load", Command: "uptime | awk -F'load average:' '{print $2}' | xargs"}); result.ExitCode == 0 && result.Output != "" {
-		info.LoadAverage = strings.TrimSpace(result.Output)
-	}
-
-	if result := executor.Execute(types.Command{ID: "disk", Command: "df -h / | tail -1 | awk '{print \"Root: \" $3 \"/\" $2 \" (\" $5 \" used)\"}'"}); result.ExitCode == 0 {
-		info.DiskUsage = strings.TrimSpace(result.Output)
-	}
-
-	// Get private IP addresses
-	info.PrivateIPs = getPrivateIPs()
 
 	return info
+}
+
+func formatOS(platform, version string) string {
+	platform = strings.TrimSpace(platform)
+	version = strings.TrimSpace(version)
+
+	switch {
+	case platform == "" && version == "":
+		return ""
+	case platform == "":
+		return version
+	case version == "":
+		return platform
+	default:
+		return platform + " " + version
+	}
+}
+
+func formatUptime(seconds uint64) string {
+	if seconds == 0 {
+		return "unknown"
+	}
+
+	units := []struct {
+		name  string
+		value uint64
+	}{
+		{name: "day", value: 24 * 60 * 60},
+		{name: "hour", value: 60 * 60},
+		{name: "minute", value: 60},
+	}
+
+	remaining := seconds
+	parts := make([]string, 0, 2)
+	for _, unit := range units {
+		if remaining < unit.value {
+			continue
+		}
+		count := remaining / unit.value
+		remaining %= unit.value
+		parts = append(parts, pluralize(count, unit.name))
+		if len(parts) == 2 {
+			break
+		}
+	}
+
+	if len(parts) == 0 {
+		return pluralize(seconds, "second")
+	}
+
+	return "up " + strings.Join(parts, ", ")
+}
+
+func pluralize(value uint64, singular string) string {
+	if value == 1 {
+		return fmt.Sprintf("%d %s", value, singular)
+	}
+	return fmt.Sprintf("%d %ss", value, singular)
+}
+
+func formatBytes(size uint64) string {
+	if size == 0 {
+		return "0B"
+	}
+
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
+	value := float64(size)
+	unitIndex := 0
+	for value >= 1024 && unitIndex < len(units)-1 {
+		value /= 1024
+		unitIndex++
+	}
+
+	precision := 0
+	if unitIndex > 0 && value < 10 {
+		precision = 1
+	}
+
+	return fmt.Sprintf("%.*f%s", precision, value, units[unitIndex])
+}
+
+func formatPercent(value float64) string {
+	rounded := math.Round(value*10) / 10
+	if rounded == math.Trunc(rounded) {
+		return fmt.Sprintf("%.0f%%", rounded)
+	}
+	return fmt.Sprintf("%.1f%%", rounded)
 }
 
 // getPrivateIPs returns private IP addresses
@@ -101,6 +195,8 @@ func getPrivateIPs() string {
 		}
 	}
 
+	sort.Strings(privateIPs)
+
 	if len(privateIPs) == 0 {
 		return "No private IPs found"
 	}
@@ -110,21 +206,7 @@ func getPrivateIPs() string {
 
 // isPrivateIP checks if an IP address is private
 func isPrivateIP(ip net.IP) bool {
-	// RFC 1918 private address ranges
-	private := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-	}
-
-	for _, cidr := range private {
-		_, subnet, _ := net.ParseCIDR(cidr)
-		if subnet.Contains(ip) {
-			return true
-		}
-	}
-
-	return false
+	return ip != nil && ip.IsPrivate()
 }
 
 // FormatSystemInfoForPrompt formats system information for inclusion in diagnostic prompts

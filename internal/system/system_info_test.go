@@ -357,6 +357,7 @@ func TestIsPrivateIP_IPv6(t *testing.T) {
 		expected bool
 	}{
 		{"IPv6 loopback", "::1", false},
+		{"IPv6 unique local", "fd00::1", true},
 		{"IPv6 public", "2001:4860:4860::8888", false},
 		// Add more IPv6 tests as needed
 	}
@@ -371,6 +372,88 @@ func TestIsPrivateIP_IPv6(t *testing.T) {
 			result := isPrivateIP(ip)
 			if result != tt.expected {
 				t.Errorf("For IPv6 %s: expected %v, got %v", tt.ip, tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestFormatOS(t *testing.T) {
+	tests := []struct {
+		name     string
+		platform string
+		version  string
+		want     string
+	}{
+		{name: "platform and version", platform: "ubuntu", version: "24.04", want: "ubuntu 24.04"},
+		{name: "platform only", platform: "linux", want: "linux"},
+		{name: "version only", version: "24.04", want: "24.04"},
+		{name: "empty", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatOS(tt.platform, tt.version); got != tt.want {
+				t.Errorf("formatOS(%q, %q) = %q, want %q", tt.platform, tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatUptime(t *testing.T) {
+	tests := []struct {
+		name    string
+		seconds uint64
+		want    string
+	}{
+		{name: "unknown", seconds: 0, want: "unknown"},
+		{name: "seconds", seconds: 45, want: "45 seconds"},
+		{name: "minutes", seconds: 5 * 60, want: "up 5 minutes"},
+		{name: "days and hours", seconds: 2*24*60*60 + 3*60*60, want: "up 2 days, 3 hours"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatUptime(tt.seconds); got != tt.want {
+				t.Errorf("formatUptime(%d) = %q, want %q", tt.seconds, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	tests := []struct {
+		name string
+		size uint64
+		want string
+	}{
+		{name: "zero", size: 0, want: "0B"},
+		{name: "kibibytes", size: 1536, want: "1.5KiB"},
+		{name: "gibibytes", size: 16 * 1024 * 1024 * 1024, want: "16GiB"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatBytes(tt.size); got != tt.want {
+				t.Errorf("formatBytes(%d) = %q, want %q", tt.size, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatPercent(t *testing.T) {
+	tests := []struct {
+		name  string
+		value float64
+		want  string
+	}{
+		{name: "whole number", value: 50, want: "50%"},
+		{name: "fractional", value: 50.26, want: "50.3%"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatPercent(tt.value); got != tt.want {
+				t.Errorf("formatPercent(%v) = %q, want %q", tt.value, got, tt.want)
 			}
 		})
 	}

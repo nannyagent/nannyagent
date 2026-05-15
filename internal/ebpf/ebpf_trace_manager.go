@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"nannyagent/internal/hostinfo"
 	"nannyagent/internal/logging"
 )
 
@@ -145,15 +146,8 @@ func (tm *BCCTraceManager) testCapabilities() {
 	tm.capabilities["root_access"] = os.Geteuid() == 0
 
 	// Test kernel version
-	cmd := exec.Command("uname", "-r")
-	output, err := cmd.Output()
-	if err == nil {
-		version := strings.TrimSpace(string(output))
-		// eBPF requires kernel 4.4+
-		tm.capabilities["kernel_ebpf"] = !strings.HasPrefix(version, "3.")
-	} else {
-		tm.capabilities["kernel_ebpf"] = false
-	}
+	version := hostinfo.KernelVersion()
+	tm.capabilities["kernel_ebpf"] = version != "unknown" && !strings.HasPrefix(version, "3.")
 
 	// Test if we can access debugfs
 	if _, err := os.Stat("/sys/kernel/debug/tracing/available_events"); err == nil {
@@ -262,7 +256,9 @@ func (tm *BCCTraceManager) StartTrace(spec TraceSpec) (string, error) {
 
 	logging.Debug("Started BCC-style trace %s for target %s", traceID, spec.Target)
 	return traceID, nil
-} // generateBpftraceScript generates a bpftrace script based on the trace specification
+}
+
+// generateBpftraceScript generates a bpftrace script based on the trace specification
 func (tm *BCCTraceManager) generateBpftraceScript(spec TraceSpec) (string, error) {
 	var script strings.Builder
 
@@ -270,17 +266,9 @@ func (tm *BCCTraceManager) generateBpftraceScript(spec TraceSpec) (string, error
 	var probe string
 	switch spec.ProbeType {
 	case "p", "": // kprobe (default)
-		if strings.HasPrefix(spec.Target, "sys_") || strings.HasPrefix(spec.Target, "__x64_sys_") {
-			probe = fmt.Sprintf("kprobe:%s", spec.Target)
-		} else {
-			probe = fmt.Sprintf("kprobe:%s", spec.Target)
-		}
+		probe = formatProbe("kprobe", spec.Target)
 	case "r": // kretprobe
-		if strings.HasPrefix(spec.Target, "sys_") || strings.HasPrefix(spec.Target, "__x64_sys_") {
-			probe = fmt.Sprintf("kretprobe:%s", spec.Target)
-		} else {
-			probe = fmt.Sprintf("kretprobe:%s", spec.Target)
-		}
+		probe = formatProbe("kretprobe", spec.Target)
 	case "t": // tracepoint
 		// If target already includes tracepoint prefix, use as-is
 		if strings.HasPrefix(spec.Target, "tracepoint:") {
@@ -339,6 +327,10 @@ func (tm *BCCTraceManager) generateBpftraceScript(spec TraceSpec) (string, error
 	script.WriteString("}\n")
 
 	return script.String(), nil
+}
+
+func formatProbe(prefix, target string) string {
+	return fmt.Sprintf("%s:%s", prefix, target)
 }
 
 // needsFiltering checks if any filters are needed

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"nannyagent/internal/hostinfo"
+	"nannyagent/internal/nannyapi"
 	"nannyagent/internal/types"
 )
 
@@ -173,8 +175,7 @@ func TestConvertSystemMetrics(t *testing.T) {
 }
 
 func TestGetAllIPs(t *testing.T) {
-	collector := NewCollector("v1.0.0", "http://localhost:8090")
-	ips := collector.getAllIPs()
+	_, ips := hostinfo.IPAddresses()
 
 	if ips == nil {
 		t.Error("Expected IPs slice to be initialized")
@@ -188,11 +189,7 @@ func TestGetAllIPs(t *testing.T) {
 	}
 }
 
-func TestSafeCastUint64Value(t *testing.T) {
-	collector := NewCollector("v1.0.0", "http://localhost:8090")
-
-	const maxSafeInt = 9007199254740991 // 2^53 - 1
-
+func TestSafeCastUint64(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    uint64
@@ -200,15 +197,15 @@ func TestSafeCastUint64Value(t *testing.T) {
 	}{
 		{"Normal value", 1024, 1024},
 		{"Zero", 0, 0},
-		{"Large value", 1 << 40, 1 << 40},                           // 1 TB
-		{"Max uint64 (capped)", ^uint64(0), maxSafeInt},             // Should be capped to maxSafeInt
-		{"Value above max safe int", maxSafeInt + 1000, maxSafeInt}, // Should be capped
-		{"Value at max safe int", maxSafeInt, maxSafeInt},           // Should not be capped
+		{"Large value", 1 << 40, 1 << 40},                                   // 1 TB
+		{"Max uint64 (capped)", ^uint64(0), maxSafeJSONInt},                 // Should be capped to maxSafeInt
+		{"Value above max safe int", maxSafeJSONInt + 1000, maxSafeJSONInt}, // Should be capped
+		{"Value at max safe int", maxSafeJSONInt, maxSafeJSONInt},           // Should not be capped
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := collector.safeCastUint64Value(tt.input)
+			result := safeCastUint64(tt.input)
 			if result != tt.expected {
 				t.Errorf("Expected %d, got %d", tt.expected, result)
 			}
@@ -234,9 +231,7 @@ func TestGetNetworkStatsMbps(t *testing.T) {
 }
 
 func TestGetIPAddress(t *testing.T) {
-	collector := NewCollector("v1.0.0", "http://localhost:8090")
-
-	ip := collector.getIPAddress()
+	ip, _ := hostinfo.IPAddresses()
 
 	if ip == "" {
 		t.Error("IP address should not be empty")
@@ -285,12 +280,7 @@ func TestGetFilesystemInfo(t *testing.T) {
 		}
 
 		// Should be one of the whitelisted types
-		allowedTypes := map[string]bool{
-			"ext2": true, "ext3": true, "ext4": true,
-			"xfs": true, "btrfs": true, "zfs": true,
-			"ntfs": true, "vfat": true, "exfat": true,
-		}
-		if !allowedTypes[fs.Fstype] {
+		if !isAllowedFilesystemType(fs.Fstype) {
 			t.Errorf("Filesystem %d: Unexpected fstype %s", i, fs.Fstype)
 		}
 
@@ -306,6 +296,35 @@ func TestGetFilesystemInfo(t *testing.T) {
 			t.Errorf("Filesystem %d: UsagePercent should be between 0 and 100, got %.2f", i, fs.UsagePercent)
 		}
 	}
+}
+
+func TestCollectorHelpers(t *testing.T) {
+	t.Run("round2", func(t *testing.T) {
+		if got := round2(1.235); got != 1.24 {
+			t.Fatalf("round2() = %.2f, want 1.24", got)
+		}
+	})
+
+	t.Run("bytesToGB", func(t *testing.T) {
+		if got := bytesToGB(3*bytesPerGB + bytesPerGB/2); got != 3.5 {
+			t.Fatalf("bytesToGB() = %.2f, want 3.50", got)
+		}
+	})
+
+	t.Run("calculateUsagePercent", func(t *testing.T) {
+		if got := calculateUsagePercent(1, 3); got != 33.33 {
+			t.Fatalf("calculateUsagePercent() = %.2f, want 33.33", got)
+		}
+	})
+
+	t.Run("isAllowedBlockDevice", func(t *testing.T) {
+		if !isAllowedBlockDevice("/dev/nvme0n1") {
+			t.Fatal("expected NVMe device to be allowed")
+		}
+		if isAllowedBlockDevice("tmpfs") {
+			t.Fatal("expected non-device path to be rejected")
+		}
+	})
 }
 
 func TestGetBlockDevices(t *testing.T) {
@@ -423,7 +442,7 @@ func TestBlockDeviceType(t *testing.T) {
 
 func TestIngestMetricsRequestMarshaling(t *testing.T) {
 	req := types.IngestMetricsRequest{
-		Action: "ingest-metrics",
+		Action: nannyapi.ActionIngestMetrics,
 		OSType: "linux",
 	}
 

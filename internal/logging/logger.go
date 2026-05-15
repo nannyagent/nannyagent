@@ -18,6 +18,11 @@ const (
 	LevelError
 )
 
+const (
+	DefaultRepeatedFailureThreshold = 3
+	DefaultRepeatedFailureInterval  = 10
+)
+
 func (l LogLevel) String() string {
 	switch l {
 	case LevelDebug:
@@ -81,6 +86,28 @@ func getLogLevelFromEnv() LogLevel {
 	default:
 		return LevelInfo
 	}
+}
+
+// ShouldLogRepeatedFailure returns true when a repeated failure should be surfaced
+// beyond debug logging. It emits at the first visible threshold, then every
+// repeatEvery attempts after that.
+func ShouldLogRepeatedFailure(attempt, firstVisible, repeatEvery int) bool {
+	if attempt <= 0 {
+		return false
+	}
+	if firstVisible <= 1 {
+		if repeatEvery <= 0 {
+			return true
+		}
+		return attempt == 1 || (attempt-1)%repeatEvery == 0
+	}
+	if attempt < firstVisible {
+		return false
+	}
+	if repeatEvery <= 0 {
+		return attempt == firstVisible
+	}
+	return attempt == firstVisible || (attempt-firstVisible)%repeatEvery == 0
 }
 
 // logMessage handles the actual logging

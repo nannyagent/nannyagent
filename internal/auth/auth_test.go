@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"nannyagent/internal/config"
+	"nannyagent/internal/hostinfo"
+	"nannyagent/internal/nannyapi"
 	"nannyagent/internal/types"
 )
 
@@ -91,8 +93,8 @@ func TestStartDeviceAuthorization(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("Expected POST request, got %s", r.Method)
 		}
-		if r.URL.Path != "/api/agent" {
-			t.Errorf("Expected path /api/agent, got %s", r.URL.Path)
+		if r.URL.Path != nannyapi.EndpointAgent {
+			t.Errorf("Expected path %s, got %s", nannyapi.EndpointAgent, r.URL.Path)
 		}
 
 		resp := types.DeviceAuthResponse{
@@ -133,7 +135,7 @@ func TestRefreshAccessToken(t *testing.T) {
 		var req types.RefreshRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		if req.Action != "refresh" {
+		if req.Action != nannyapi.ActionRefresh {
 			t.Errorf("Expected action='refresh', got '%s'", req.Action)
 		}
 		if req.RefreshToken != "old_refresh_token" {
@@ -327,8 +329,8 @@ func TestGetTokenPath(t *testing.T) {
 }
 
 // TestGetHostname tests hostname retrieval
-func TestGetHostname(t *testing.T) {
-	hostname := getHostname()
+func TestHostInfoHostname(t *testing.T) {
+	hostname := hostinfo.Hostname()
 
 	if hostname == "" {
 		t.Error("Hostname should not be empty")
@@ -346,7 +348,7 @@ func TestAuthorizeDeviceCode(t *testing.T) {
 		var req types.AuthorizeRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		if req.Action != "authorize" {
+		if req.Action != nannyapi.ActionAuthorize {
 			t.Errorf("Expected action='authorize', got '%s'", req.Action)
 		}
 		if req.UserCode != "TESTCDE1" {

@@ -1,12 +1,14 @@
 package realtime
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"nannyagent/internal/nannyapi"
 	"nannyagent/internal/types"
 )
 
@@ -20,7 +22,7 @@ func mockToken(t string) TokenProvider { return &staticTokenProvider{token: t} }
 func TestClient_Start(t *testing.T) {
 	// Create a mock SSE server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/realtime" {
+		if r.URL.Path == nannyapi.EndpointRealtime {
 			switch r.Method {
 			case "GET":
 				// Handshake
@@ -36,7 +38,7 @@ func TestClient_Start(t *testing.T) {
 				time.Sleep(100 * time.Millisecond)
 
 				// Send an event
-				_, _ = fmt.Fprintf(w, "data: {\"action\": \"create\", \"record\": {\"id\": \"inv-123\", \"user_prompt\": \"test prompt\"}}\n\n")
+				_, _ = fmt.Fprintf(w, "data: {\"action\": %q, \"record\": {\"id\": \"inv-123\", \"user_prompt\": \"test prompt\"}}\n\n", nannyapi.ActionCreate)
 				w.(http.Flusher).Flush()
 
 				// Keep connection open for a bit
@@ -146,7 +148,7 @@ func TestCalculateBackoff_NegativeAttempt(t *testing.T) {
 func TestClient_RebootHandler(t *testing.T) {
 	// Create a mock SSE server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/realtime" {
+		if r.URL.Path == nannyapi.EndpointRealtime {
 			switch r.Method {
 			case "GET":
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -160,7 +162,7 @@ func TestClient_RebootHandler(t *testing.T) {
 				time.Sleep(100 * time.Millisecond)
 
 				// Send a reboot operation event
-				rebootEvent := `{"action": "create", "record": {"id": "reboot-123", "agent_id": "agent-456", "status": "sent", "timeout_seconds": 300, "reason": "maintenance", "requested_at": "2026-01-24T10:00:00Z"}}`
+				rebootEvent := fmt.Sprintf(`{"action": %q, "record": {"id": "reboot-123", "agent_id": "agent-456", "status": "sent", "timeout_seconds": 300, "reason": "maintenance", "requested_at": "2026-01-24T10:00:00Z"}}`, nannyapi.ActionCreate)
 				_, _ = fmt.Fprintf(w, "data: %s\n\n", rebootEvent)
 				w.(http.Flusher).Flush()
 
@@ -206,7 +208,7 @@ func TestClient_RebootHandler(t *testing.T) {
 func TestClient_PatchHandler(t *testing.T) {
 	// Create a mock SSE server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/realtime" {
+		if r.URL.Path == nannyapi.EndpointRealtime {
 			switch r.Method {
 			case "GET":
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -219,7 +221,7 @@ func TestClient_PatchHandler(t *testing.T) {
 				time.Sleep(100 * time.Millisecond)
 
 				// Send a patch operation event
-				patchEvent := `{"action": "create", "record": {"id": "patch-123", "mode": "dry-run", "script_id": "script-456", "script_url": "/scripts/test.sh"}}`
+				patchEvent := fmt.Sprintf(`{"action": %q, "record": {"id": "patch-123", "mode": "dry-run", "script_id": "script-456", "script_url": "/scripts/test.sh"}}`, nannyapi.ActionCreate)
 				_, _ = fmt.Fprintf(w, "data: %s\n\n", patchEvent)
 				w.(http.Flusher).Flush()
 
@@ -255,5 +257,69 @@ func TestClient_PatchHandler(t *testing.T) {
 		// Success
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timeout waiting for patch handler")
+	}
+}
+
+func TestClient_SubscriptionRequestUsesBearerAuth(t *testing.T) {
+	subscriptionChecked := make(chan struct{}, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != nannyapi.EndpointRealtime {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			if got := r.Header.Get(nannyapi.HeaderAuthorization); got != nannyapi.BearerPrefix+"subscription-token" {
+				t.Errorf("Expected authorization header %q on handshake, got %q", nannyapi.BearerPrefix+"subscription-token", got)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintf(w, "data: {\"clientId\": \"subscription-client-id\"}\n\n")
+			w.(http.Flusher).Flush()
+			time.Sleep(300 * time.Millisecond)
+		case http.MethodPost:
+			if got := r.Header.Get(nannyapi.HeaderAuthorization); got != nannyapi.BearerPrefix+"subscription-token" {
+				t.Errorf("Expected authorization header %q, got %q", nannyapi.BearerPrefix+"subscription-token", got)
+			}
+			if got := r.Header.Get(nannyapi.HeaderContentType); got != nannyapi.ContentTypeJSON {
+				t.Errorf("Expected content type %q, got %q", nannyapi.ContentTypeJSON, got)
+			}
+
+			var payload struct {
+				ClientID      string   `json:"clientId"`
+				Subscriptions []string `json:"subscriptions"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("Failed to decode subscription payload: %v", err)
+			}
+			if payload.ClientID != "subscription-client-id" {
+				t.Errorf("Expected clientId subscription-client-id, got %q", payload.ClientID)
+			}
+			expected := []string{"investigations", "patch_operations", "reboot_operations"}
+			if len(payload.Subscriptions) != len(expected) {
+				t.Fatalf("Expected %d subscriptions, got %d", len(expected), len(payload.Subscriptions))
+			}
+			for index, want := range expected {
+				if payload.Subscriptions[index] != want {
+					t.Errorf("Subscription %d = %q, want %q", index, payload.Subscriptions[index], want)
+				}
+			}
+
+			subscriptionChecked <- struct{}{}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, mockToken("subscription-token"), nil, nil, nil)
+	go client.Start()
+
+	select {
+	case <-subscriptionChecked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for subscription request")
 	}
 }

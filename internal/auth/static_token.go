@@ -1,20 +1,16 @@
 package auth
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
-	"github.com/shirou/gopsutil/v3/host"
-
 	"nannyagent/internal/config"
+	"nannyagent/internal/hostinfo"
 	"nannyagent/internal/logging"
+	"nannyagent/internal/nannyapi"
 )
 
 // StaticTokenAuthManager handles authentication using a static API token (nsk_*).
@@ -46,10 +42,7 @@ func NewStaticTokenAuthManager(cfg *config.Config) *StaticTokenAuthManager {
 		agentID:   cfg.AgentID,
 		token:     cfg.StaticToken,
 		transport: transport,
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   5 * time.Minute,
-		},
+		client:    newHTTPClient(transport),
 	}
 }
 
@@ -116,17 +109,17 @@ type StaticRegisterResponse struct {
 // POST /api/agent { action: "register-with-token" } with the static token
 // Authorization header.  The backend creates the agent and returns an agent_id.
 func (sm *StaticTokenAuthManager) Register(version string) (*StaticRegisterResponse, error) {
-	primaryIP, allIPs := staticGetIPs()
+	metadata := hostinfo.Collect()
 
 	payload := staticRegisterRequest{
-		Action:         "register-with-token",
-		Hostname:       staticGetHostname(),
-		OSType:         staticGetPlatform(),
-		PlatformFamily: staticGetPlatformFamily(),
+		Action:         nannyapi.ActionRegisterWithToken,
+		Hostname:       metadata.Hostname,
+		OSType:         metadata.Platform,
+		PlatformFamily: metadata.PlatformFamily,
 		Version:        version,
-		PrimaryIP:      primaryIP,
-		KernelVersion:  staticGetKernelVersion(),
-		AllIPs:         allIPs,
+		PrimaryIP:      metadata.PrimaryIP,
+		KernelVersion:  metadata.KernelVersion,
+		AllIPs:         metadata.AllIPs,
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -156,122 +149,17 @@ func (sm *StaticTokenAuthManager) Register(version string) (*StaticRegisterRespo
 	return &resp, nil
 }
 
-// ── System-info helpers (package-level, mirror the ones in auth.go) ────────
-
-func staticGetHostname() string {
-	if hostname, err := os.Hostname(); err == nil {
-		return hostname
-	}
-	return "unknown"
-}
-
-func staticGetPlatform() string {
-	platform := os.Getenv("GOOS")
-	if platform == "" {
-		platform = "linux"
-	}
-	return platform
-}
-
-func staticGetPlatformFamily() string {
-	platform, family, _, err := host.PlatformInformation()
-	if err != nil {
-		return "unknown"
-	}
-	if family == "" {
-		return platform
-	}
-	return family
-}
-
-func staticGetKernelVersion() string {
-	version, err := host.KernelVersion()
-	if err != nil {
-		return "unknown"
-	}
-	return version
-}
-
-// staticGetIPs returns the primary non-loopback IP and a list of all IPs.
-func staticGetIPs() (string, []string) {
-	var primaryIP string
-	var allIPs []string
-
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return "unknown", nil
-	}
-
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			var ip net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-			if ip == nil || ip.IsLoopback() {
-				continue
-			}
-			allIPs = append(allIPs, ip.String())
-			if primaryIP == "" && ip.To4() != nil {
-				primaryIP = ip.String()
-			}
-		}
-	}
-
-	if primaryIP == "" {
-		primaryIP = "unknown"
-	}
-	return primaryIP, allIPs
-}
-
 // AuthenticatedRequest performs an HTTP request with the static token and
 // X-Agent-ID header. Retries indefinitely on connection errors with
 // exponential backoff (same resilience as OAuth AuthManager).
 func (sm *StaticTokenAuthManager) AuthenticatedRequest(method, url string, body []byte, headers map[string]string) (int, []byte, error) {
-	for {
-		resp, err := sm.AuthenticatedDo(method, url, body, headers)
-		if err != nil {
-			return 0, nil, err
-		}
-
-		statusCode := resp.StatusCode
-		respBody, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-
-		if readErr == nil {
-			sm.clearConnErrors()
-			sm.resetRetryAttempts()
-			return statusCode, respBody, nil
-		}
-
-		// Body read failed — retry with backoff
-		if isConnectionError(readErr) {
-			if sm.recordConnError() {
-				logging.Info("Static token: transport reset triggered by read error: %v", readErr)
-			}
-			backoff := sm.calculateBackoff()
-			sm.incrementRetryAttempts()
-			logging.Warning("Static token: read error: %v. Retrying in %v", readErr, backoff)
-			time.Sleep(backoff)
-			continue
-		}
-
-		backoff := sm.calculateBackoff()
-		sm.incrementRetryAttempts()
-		logging.Warning("Static token: read error: %v. Retrying in %v", readErr, backoff)
-		sm.getClient().CloseIdleConnections()
-		time.Sleep(backoff)
-	}
+	return authenticatedRequestWithRetry(sm, func() (*http.Response, error) {
+		return sm.AuthenticatedDo(method, url, body, headers)
+	}, responseRetryLogConfig{
+		transportResetFormat: "Static token: transport reset triggered by read error: %v",
+		connectionReadFormat: "Static token: read error: %v. Retrying in %v",
+		readFormat:           "Static token: read error: %v. Retrying in %v",
+	})
 }
 
 // AuthenticatedDo performs an HTTP request with static token auth and infinite
@@ -279,29 +167,19 @@ func (sm *StaticTokenAuthManager) AuthenticatedRequest(method, url string, body 
 // need streaming or custom body handling.
 func (sm *StaticTokenAuthManager) AuthenticatedDo(method, url string, body []byte, headers map[string]string) (*http.Response, error) {
 	for {
-		req, err := http.NewRequest(method, url, bytes.NewBuffer(body))
+		req, err := newAPIRequest(method, url, body, headers)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
-		}
-
-		// Set default content type if not provided
-		if headers == nil || headers["Content-Type"] == "" {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		for k, v := range headers {
-			req.Header.Set(k, v)
+			return nil, err
 		}
 
 		// Static token auth
-		req.Header.Set("Authorization", "Bearer "+sm.token)
+		setBearerAuthorization(req, sm.token)
 
 		// X-Agent-ID to act as the specific agent
 		sm.mu.RLock()
 		agentID := sm.agentID
 		sm.mu.RUnlock()
-		if agentID != "" {
-			req.Header.Set("X-Agent-ID", agentID)
-		}
+		setAgentIDHeader(req, agentID)
 
 		client := sm.getClient()
 		resp, err := client.Do(req)
@@ -355,27 +233,7 @@ func (sm *StaticTokenAuthManager) calculateBackoff() time.Duration {
 	tc := sm.config.HTTPTransport
 	sm.mu.RUnlock()
 
-	initialDelay := time.Duration(tc.InitialRetryDelaySec) * time.Second
-	maxDelay := time.Duration(tc.MaxRetryDelaySec) * time.Second
-
-	if attempts <= 0 {
-		return initialDelay
-	}
-	if attempts > 30 {
-		return maxDelay
-	}
-
-	// Use integer shift to avoid float64 overflow in math.Pow.
-	// Clamp to maxDelay before multiplication to prevent time.Duration overflow.
-	shift := time.Duration(1) << uint(attempts)
-	if shift <= 0 || initialDelay > maxDelay/shift {
-		return maxDelay
-	}
-	backoff := initialDelay * shift
-	if backoff > maxDelay {
-		backoff = maxDelay
-	}
-	return backoff
+	return calculateBackoff(attempts, tc)
 }
 
 func (sm *StaticTokenAuthManager) incrementRetryAttempts() {
@@ -422,10 +280,7 @@ func (sm *StaticTokenAuthManager) resetTransport() {
 	}
 
 	sm.transport = createTransport(sm.config)
-	sm.client = &http.Client{
-		Transport: sm.transport,
-		Timeout:   5 * time.Minute,
-	}
+	sm.client = newHTTPClient(sm.transport)
 	sm.consecutiveConnErrors = 0
 }
 
