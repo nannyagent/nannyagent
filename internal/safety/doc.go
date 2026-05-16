@@ -6,17 +6,21 @@ var AllowedExecUses = map[string]map[string]bool{
 	},
 	"internal/ebpf/ebpf_trace_manager.go": {
 		"CommandContext": true,
+		"Cmd":            true,
 		"LookPath":       true,
 	},
 	"internal/executor/executor.go": {
 		"CommandContext": true,
+		"ExitError":      true,
 	},
 	"internal/app/runtime.go": {
 		"Command":  true,
 		"LookPath": true,
 	},
 	"internal/patches/patch_manager.go": {
-		"Command": true,
+		"Cmd":       true,
+		"Command":   true,
+		"ExitError": true,
 	},
 	"internal/proxmox/collector.go": {
 		"Command": true,
@@ -25,9 +29,11 @@ var AllowedExecUses = map[string]map[string]bool{
 		"Command": true,
 	},
 	"internal/patches/patch_manager_lxc_test.go": {
+		"Cmd":     true,
 		"Command": true,
 	},
 	"internal/reboot/reboot_manager_test.go": {
+		"Cmd":     true,
 		"Command": true,
 	},
 }

@@ -79,7 +79,7 @@ func IPAddresses() (string, []string) {
 
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		return unknownValue, nil
+		return unknownValue, []string{}
 	}
 
 	for _, iface := range interfaces {

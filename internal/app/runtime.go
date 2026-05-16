@@ -23,24 +23,17 @@ import (
 func RunRegisterCommand(version, dataDir string, cliFlags *config.CLIFlags) {
 	logging.Info("Starting NannyAgent registration with NannyAPI")
 
-	if err := CheckExistingAgentInstance(TokenPath("", dataDir)); err != nil {
+	cfg, tokenPath, err := loadRegisterConfig(dataDir, cliFlags)
+	if err != nil {
+		logging.Error("Invalid configuration: %v", err)
+		os.Exit(1)
+	}
+
+	if err := CheckExistingAgentInstance(tokenPath); err != nil {
 		logging.Error("Cannot register: %v", err)
 		logging.Error("Only one agent instance is allowed per machine")
 		logging.Error("To re-register, remove the existing token:")
 		logging.Error("  sudo rm -rf %s", dataDir)
-		os.Exit(1)
-	}
-
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		logging.Warning("Could not load configuration, using defaults: %v", err)
-		cfg = &config.DefaultConfig
-		cfg.APIBaseURL = os.Getenv("NANNYAPI_URL")
-	}
-
-	cfg.ApplyCLIFlags(cliFlags)
-	if err := cfg.ValidateAfterMerge(); err != nil {
-		logging.Error("Invalid configuration: %v", err)
 		os.Exit(1)
 	}
 
@@ -57,6 +50,23 @@ func RunRegisterCommand(version, dataDir string, cliFlags *config.CLIFlags) {
 	}
 
 	runOAuthRegister(cfg)
+}
+
+func loadRegisterConfig(dataDir string, cliFlags *config.CLIFlags) (*config.Config, string, error) {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		logging.Warning("Could not load configuration, using defaults: %v", err)
+		defaultConfig := config.DefaultConfig
+		cfg = &defaultConfig
+		cfg.APIBaseURL = os.Getenv("NANNYAPI_URL")
+	}
+
+	cfg.ApplyCLIFlags(cliFlags)
+	if err := cfg.ValidateAfterMerge(); err != nil {
+		return nil, "", err
+	}
+
+	return cfg, TokenPath(cfg.TokenPath, dataDir), nil
 }
 
 func runStaticTokenRegister(version string, cfg *config.Config) {

@@ -803,11 +803,6 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 			continue
 		}
 
-		// Successful request - clear all error tracking
-		am.clearConnErrors()
-		am.resetRetryAttempts()
-		am.resetAuthIssueTracking()
-
 		if resp.StatusCode == http.StatusUnauthorized {
 			_ = resp.Body.Close()
 
@@ -894,6 +889,14 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 			time.Sleep(backoff)
 			continue
 		}
+
+		// Only clear error tracking after a truly successful response.
+		// Keep retry/auth failure state intact for unauthorized and server
+		// error responses so backoff and repeated-failure escalation can
+		// accumulate across retries.
+		am.clearConnErrors()
+		am.resetRetryAttempts()
+		am.resetAuthIssueTracking()
 
 		// Success or client error (4xx except 401) - return response
 		return resp, nil
