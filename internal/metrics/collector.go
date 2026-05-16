@@ -17,9 +17,42 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/shirou/gopsutil/v3/net"
 
+	"nannyagent/internal/hostinfo"
 	"nannyagent/internal/logging"
+	"nannyagent/internal/nannyapi"
 	"nannyagent/internal/types"
 )
+
+const (
+	collectorHTTPTimeout = 30 * time.Second
+	defaultLocation      = "unknown"
+	defaultProcessCount  = 0
+	roundScale           = 100.0
+	bytesPerMB           = 1024 * 1024
+	bytesPerGB           = 1024 * 1024 * 1024
+	maxSafeJSONInt       = 9007199254740991 // 2^53 - 1 (max safe integer in JSON/JavaScript)
+)
+
+var allowedFilesystemTypes = map[string]struct{}{
+	"ext2":  {},
+	"ext3":  {},
+	"ext4":  {},
+	"xfs":   {},
+	"btrfs": {},
+	"zfs":   {},
+	"ntfs":  {},
+	"vfat":  {},
+	"exfat": {},
+}
+
+var allowedBlockDevicePrefixes = []string{
+	"/dev/sd",     // SCSI/SATA disks
+	"/dev/hd",     // IDE disks
+	"/dev/vd",     // Virtual disks (KVM/QEMU)
+	"/dev/xvd",    // Xen virtual disks
+	"/dev/nvme",   // NVMe disks
+	"/dev/mmcblk", // SD/MMC cards
+}
 
 // Collector handles system metrics collection
 type Collector struct {
@@ -34,25 +67,38 @@ func NewCollector(agentVersion string, apiBaseURL string) *Collector {
 		agentVersion: agentVersion,
 		apiBaseURL:   apiBaseURL,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: collectorHTTPTimeout,
 		},
 	}
 }
 
 // GatherSystemMetrics collects comprehensive system metrics
 func (c *Collector) GatherSystemMetrics() (*types.SystemMetrics, error) {
+	metadata := hostinfo.Collect()
+
 	metrics := &types.SystemMetrics{
-		Timestamp: time.Now(),
-		OSType:    runtime.GOOS,
+		Timestamp:      time.Now(),
+		Hostname:       metadata.Hostname,
+		OSType:         metadata.Platform,
+		AllIPs:         metadata.AllIPs,
+		IPAddress:      metadata.PrimaryIP,
+		KernelVersion:  metadata.KernelVersion,
+		PlatformFamily: metadata.PlatformFamily,
 	}
 
 	// System Information
 	if hostInfo, err := host.Info(); err == nil {
-		metrics.Hostname = hostInfo.Hostname
+		if hostInfo.Hostname != "" {
+			metrics.Hostname = hostInfo.Hostname
+		}
 		metrics.Platform = hostInfo.Platform
-		metrics.PlatformFamily = hostInfo.PlatformFamily
+		if hostInfo.PlatformFamily != "" {
+			metrics.PlatformFamily = hostInfo.PlatformFamily
+		}
 		metrics.PlatformVersion = hostInfo.PlatformVersion
-		metrics.KernelVersion = hostInfo.KernelVersion
+		if hostInfo.KernelVersion != "" {
+			metrics.KernelVersion = hostInfo.KernelVersion
+		}
 		metrics.KernelArch = hostInfo.KernelArch
 		if hostInfo.OS != "" {
 			metrics.OSType = hostInfo.OS
@@ -61,7 +107,7 @@ func (c *Collector) GatherSystemMetrics() (*types.SystemMetrics, error) {
 
 	// CPU Metrics
 	if percentages, err := cpu.Percent(time.Second, false); err == nil && len(percentages) > 0 {
-		metrics.CPUUsage = math.Round(percentages[0]*100) / 100
+		metrics.CPUUsage = round2(percentages[0])
 	}
 
 	if cpuInfo, err := cpu.Info(); err == nil && len(cpuInfo) > 0 {
@@ -71,25 +117,25 @@ func (c *Collector) GatherSystemMetrics() (*types.SystemMetrics, error) {
 
 	// Memory Metrics
 	if memInfo, err := mem.VirtualMemory(); err == nil {
-		metrics.MemoryUsage = math.Round(float64(memInfo.Used)/(1024*1024)*100) / 100 // MB
-		metrics.MemoryTotal = c.safeCastUint64Value(memInfo.Total)
-		metrics.MemoryUsed = c.safeCastUint64Value(memInfo.Used)
-		metrics.MemoryFree = c.safeCastUint64Value(memInfo.Free)
-		metrics.MemoryAvailable = c.safeCastUint64Value(memInfo.Available)
+		metrics.MemoryUsage = bytesToMB(memInfo.Used)
+		metrics.MemoryTotal = safeCastUint64(memInfo.Total)
+		metrics.MemoryUsed = safeCastUint64(memInfo.Used)
+		metrics.MemoryFree = safeCastUint64(memInfo.Free)
+		metrics.MemoryAvailable = safeCastUint64(memInfo.Available)
 	}
 
 	if swapInfo, err := mem.SwapMemory(); err == nil {
-		metrics.SwapTotal = c.safeCastUint64Value(swapInfo.Total)
-		metrics.SwapUsed = c.safeCastUint64Value(swapInfo.Used)
-		metrics.SwapFree = c.safeCastUint64Value(swapInfo.Free)
+		metrics.SwapTotal = safeCastUint64(swapInfo.Total)
+		metrics.SwapUsed = safeCastUint64(swapInfo.Used)
+		metrics.SwapFree = safeCastUint64(swapInfo.Free)
 	}
 
 	// Disk Metrics
 	if diskInfo, err := disk.Usage("/"); err == nil {
-		metrics.DiskUsage = math.Round(diskInfo.UsedPercent*100) / 100
-		metrics.DiskTotal = c.safeCastUint64Value(diskInfo.Total)
-		metrics.DiskUsed = c.safeCastUint64Value(diskInfo.Used)
-		metrics.DiskFree = c.safeCastUint64Value(diskInfo.Free)
+		metrics.DiskUsage = round2(diskInfo.UsedPercent)
+		metrics.DiskTotal = safeCastUint64(diskInfo.Total)
+		metrics.DiskUsed = safeCastUint64(diskInfo.Used)
+		metrics.DiskFree = safeCastUint64(diskInfo.Free)
 	}
 
 	// Load Averages
@@ -101,7 +147,7 @@ func (c *Collector) GatherSystemMetrics() (*types.SystemMetrics, error) {
 
 	// Process Count (simplified - using a constant for now)
 	// Note: gopsutil doesn't have host.Processes(), would need process.Processes()
-	metrics.ProcessCount = 0 // Placeholder
+	metrics.ProcessCount = defaultProcessCount
 
 	// Network Metrics - convert cumulative bytes to Mbps (rounded to reasonable values)
 	totalRxGB, totalTxGB, err := c.getNetworkStatsGbps()
@@ -110,16 +156,14 @@ func (c *Collector) GatherSystemMetrics() (*types.SystemMetrics, error) {
 	}
 
 	if totalRxGB > 0.0 && totalTxGB > 0.0 {
-		metrics.NetworkInGb = math.Round(totalRxGB*100) / 100
-		metrics.NetworkOutGb = math.Round(totalTxGB*100) / 100
+		metrics.NetworkInGb = round2(totalRxGB)
+		metrics.NetworkOutGb = round2(totalTxGB)
 	} else {
 		metrics.NetworkInGb = 0.0
 		metrics.NetworkOutGb = 0.0
 	}
 
 	// IP Address and Location
-	metrics.IPAddress = c.getIPAddress()
-	metrics.AllIPs = c.getAllIPs()
 	metrics.Location = c.getLocation() // Placeholder
 
 	// Filesystem Information
@@ -145,31 +189,15 @@ func (c *Collector) getNetworkStatsGbps() (totalRxGB, totalTxGB float64, err err
 	}
 
 	// Convert bytes to gigabytes (1 GB = 1024³ bytes)
-	totalRxGB = float64(stats[0].BytesRecv) / (1024 * 1024 * 1024)
-	totalTxGB = float64(stats[0].BytesSent) / (1024 * 1024 * 1024)
+	totalRxGB = float64(stats[0].BytesRecv) / bytesPerGB
+	totalTxGB = float64(stats[0].BytesSent) / bytesPerGB
 
 	return totalRxGB, totalTxGB, nil
 }
 
-// getIPAddress returns the primary IP address of the system
-func (c *Collector) getIPAddress() string {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return "unknown"
-	}
-
-	for _, iface := range interfaces {
-		if len(iface.Addrs) > 0 && !strings.Contains(iface.Addrs[0].Addr, "127.0.0.1") {
-			return strings.Split(iface.Addrs[0].Addr, "/")[0] // Remove CIDR if present
-		}
-	}
-
-	return "unknown"
-}
-
 // getLocation returns basic location information (placeholder)
 func (c *Collector) getLocation() string {
-	return "unknown" // Would integrate with GeoIP service
+	return defaultLocation // Would integrate with GeoIP service
 }
 
 // getFilesystemInfo returns information about mounted filesystems
@@ -180,23 +208,10 @@ func (c *Collector) getFilesystemInfo() []types.FilesystemInfo {
 		return []types.FilesystemInfo{}
 	}
 
-	// Whitelist of important filesystem types
-	allowedFsTypes := map[string]bool{
-		"ext2":  true,
-		"ext3":  true,
-		"ext4":  true,
-		"xfs":   true,
-		"btrfs": true,
-		"zfs":   true,
-		"ntfs":  true,
-		"vfat":  true,
-		"exfat": true,
-	}
-
 	var filesystems []types.FilesystemInfo
 	for _, partition := range partitions {
 		// Only include whitelisted filesystem types
-		if !allowedFsTypes[partition.Fstype] {
+		if !isAllowedFilesystemType(partition.Fstype) {
 			continue
 		}
 
@@ -211,7 +226,7 @@ func (c *Collector) getFilesystemInfo() []types.FilesystemInfo {
 			Total:        usage.Total,
 			Used:         usage.Used,
 			Free:         usage.Free,
-			UsagePercent: math.Round(usage.UsedPercent*100) / 100,
+			UsagePercent: round2(usage.UsedPercent),
 		}
 		filesystems = append(filesystems, fs)
 	}
@@ -227,34 +242,11 @@ func (c *Collector) getBlockDevices() []types.BlockDevice {
 		return []types.BlockDevice{}
 	}
 
-	// Whitelist of important device prefixes (physical/virtual disks)
-	allowedDevicePrefixes := []string{
-		"/dev/sd",     // SCSI/SATA disks
-		"/dev/hd",     // IDE disks
-		"/dev/vd",     // Virtual disks (KVM/QEMU)
-		"/dev/xvd",    // Xen virtual disks
-		"/dev/nvme",   // NVMe disks
-		"/dev/mmcblk", // SD/MMC cards
-	}
-
 	var devices []types.BlockDevice
 	deviceMap := make(map[string]bool)
 
 	for _, partition := range partitions {
-		if !strings.HasPrefix(partition.Device, "/dev/") {
-			continue
-		}
-
-		// Check if device matches any allowed prefix
-		isAllowed := false
-		for _, prefix := range allowedDevicePrefixes {
-			if strings.HasPrefix(partition.Device, prefix) {
-				isAllowed = true
-				break
-			}
-		}
-
-		if !isAllowed {
+		if !isAllowedBlockDevice(partition.Device) {
 			continue
 		}
 
@@ -275,28 +267,6 @@ func (c *Collector) getBlockDevices() []types.BlockDevice {
 	return devices
 }
 
-// getAllIPs returns all IP addresses of the system
-func (c *Collector) getAllIPs() []string {
-	var ips []string
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return ips
-	}
-
-	for _, iface := range interfaces {
-		for _, addr := range iface.Addrs {
-			// Skip loopback
-			if strings.Contains(addr.Addr, "127.0.0.1") || strings.Contains(addr.Addr, "::1") {
-				continue
-			}
-			// Remove CIDR
-			ip := strings.Split(addr.Addr, "/")[0]
-			ips = append(ips, ip)
-		}
-	}
-	return ips
-}
-
 // IngestMetrics sends system metrics to NannyAPI /api/agent endpoint
 // agentID is required for upsert operation - metrics will be updated for same agent
 func (c *Collector) IngestMetrics(agentID string, authManager interface {
@@ -309,7 +279,7 @@ func (c *Collector) IngestMetrics(agentID string, authManager interface {
 
 	// Create the ingest request payload with agent_id for upsert
 	payload := types.IngestMetricsRequest{
-		Action:        "ingest-metrics",
+		Action:        nannyapi.ActionIngestMetrics,
 		SystemMetrics: pbMetrics,
 		// Populate agent metadata updates
 		OSInfo:         systemMetrics.Platform,
@@ -329,7 +299,7 @@ func (c *Collector) IngestMetrics(agentID string, authManager interface {
 	}
 
 	// Send request to NannyAPI /api/agent endpoint with authorization
-	url := fmt.Sprintf("%s/api/agent", c.apiBaseURL)
+	url := c.apiBaseURL + nannyapi.EndpointAgent
 
 	statusCode, body, err := authManager.AuthenticatedRequest("POST", url, jsonData, nil)
 	if err != nil {
@@ -375,39 +345,31 @@ func (c *Collector) convertSystemMetrics(systemMetrics *types.SystemMetrics) typ
 	filesystems := c.convertFilesystems(systemMetrics.FilesystemInfo)
 
 	// Calculate memory percentage
-	memoryPercent := 0.0
-	if systemMetrics.MemoryTotal > 0 {
-		memoryPercent = math.Round((float64(systemMetrics.MemoryUsed)/float64(systemMetrics.MemoryTotal))*10000) / 100
-	}
+	memoryPercent := calculateUsagePercent(systemMetrics.MemoryUsed, systemMetrics.MemoryTotal)
 
 	// Calculate disk usage percentage
-	diskUsagePercent := 0.0
-	if systemMetrics.DiskTotal > 0 {
-		diskUsagePercent = math.Round((float64(systemMetrics.DiskUsed)/float64(systemMetrics.DiskTotal))*10000) / 100
-	}
+	diskUsagePercent := calculateUsagePercent(systemMetrics.DiskUsed, systemMetrics.DiskTotal)
 
 	// Convert memory from bytes to GB
-	memoryUsedGB := float64(systemMetrics.MemoryUsed) / (1024 * 1024 * 1024)
-	memoryTotalGB := float64(systemMetrics.MemoryTotal) / (1024 * 1024 * 1024)
-
-	// Convert disk from bytes to GB
-	diskUsedGB := float64(systemMetrics.DiskUsed) / (1024 * 1024 * 1024)
-	diskTotalGB := float64(systemMetrics.DiskTotal) / (1024 * 1024 * 1024)
+	memoryUsedGB := bytesToGB(systemMetrics.MemoryUsed)
+	memoryTotalGB := bytesToGB(systemMetrics.MemoryTotal)
+	diskUsedGB := bytesToGB(systemMetrics.DiskUsed)
+	diskTotalGB := bytesToGB(systemMetrics.DiskTotal)
 
 	return types.NannyAgentSystemMetrics{
-		CPUPercent:       math.Round(systemMetrics.CPUUsage*100) / 100,
+		CPUPercent:       round2(systemMetrics.CPUUsage),
 		CPUCores:         systemMetrics.CPUCores,
-		MemoryUsedGB:     math.Round(memoryUsedGB*100) / 100,
-		MemoryTotalGB:    math.Round(memoryTotalGB*100) / 100,
+		MemoryUsedGB:     memoryUsedGB,
+		MemoryTotalGB:    memoryTotalGB,
 		MemoryPercent:    memoryPercent,
-		DiskUsedGB:       math.Round(diskUsedGB*100) / 100,
-		DiskTotalGB:      math.Round(diskTotalGB*100) / 100,
+		DiskUsedGB:       diskUsedGB,
+		DiskTotalGB:      diskTotalGB,
 		DiskUsagePercent: diskUsagePercent,
 		Filesystems:      filesystems,
 		LoadAverage: types.LoadAverage{
-			OneMin:     math.Round(systemMetrics.LoadAvg1*100) / 100,
-			FiveMin:    math.Round(systemMetrics.LoadAvg5*100) / 100,
-			FifteenMin: math.Round(systemMetrics.LoadAvg15*100) / 100,
+			OneMin:     round2(systemMetrics.LoadAvg1),
+			FiveMin:    round2(systemMetrics.LoadAvg5),
+			FifteenMin: round2(systemMetrics.LoadAvg15),
 		},
 		NetworkStats: types.NetworkStats{
 			InGB:  systemMetrics.NetworkInGb,
@@ -425,18 +387,13 @@ func (c *Collector) convertFilesystems(filesystemInfo []types.FilesystemInfo) []
 
 	filesystems := make([]types.FilesystemStats, 0, len(filesystemInfo))
 	for _, fs := range filesystemInfo {
-		// Convert bytes to GB
-		usedGB := float64(fs.Used) / (1024 * 1024 * 1024)
-		freeGB := float64(fs.Free) / (1024 * 1024 * 1024)
-		totalGB := float64(fs.Total) / (1024 * 1024 * 1024)
-
 		filesystems = append(filesystems, types.FilesystemStats{
 			Device:       fs.Device,
 			MountPath:    fs.Mountpoint,
-			UsedGB:       math.Round(usedGB*100) / 100,
-			FreeGB:       math.Round(freeGB*100) / 100,
-			TotalGB:      math.Round(totalGB*100) / 100,
-			UsagePercent: math.Round(fs.UsagePercent*100) / 100,
+			UsedGB:       bytesToGB(fs.Used),
+			FreeGB:       bytesToGB(fs.Free),
+			TotalGB:      bytesToGB(fs.Total),
+			UsagePercent: round2(fs.UsagePercent),
 		})
 	}
 
@@ -445,17 +402,50 @@ func (c *Collector) convertFilesystems(filesystemInfo []types.FilesystemInfo) []
 
 // safeCastUint64 caps uint64 values to prevent database numeric overflow
 // PostgreSQL numeric can handle very large numbers, but we cap at 2^53-1 for JSON safety
-func (c *Collector) safeCastUint64(val uint64) uint64 {
-	const maxSafeInt = 9007199254740991 // 2^53 - 1 (max safe integer in JSON/JavaScript)
-	if val > maxSafeInt {
-		return maxSafeInt
+func safeCastUint64(val uint64) uint64 {
+	if val > maxSafeJSONInt {
+		return maxSafeJSONInt
 	}
 	return val
 }
 
-// safeCastUint64Value is an alias for safeCastUint64 for consistency
-func (c *Collector) safeCastUint64Value(val uint64) uint64 {
-	return c.safeCastUint64(val)
+func round2(value float64) float64 {
+	return math.Round(value*roundScale) / roundScale
+}
+
+func bytesToMB(value uint64) float64 {
+	return round2(float64(value) / bytesPerMB)
+}
+
+func bytesToGB(value uint64) float64 {
+	return round2(float64(value) / bytesPerGB)
+}
+
+func calculateUsagePercent(used, total uint64) float64 {
+	if total == 0 {
+		return 0
+	}
+
+	return round2((float64(used) / float64(total)) * 100)
+}
+
+func isAllowedFilesystemType(fsType string) bool {
+	_, ok := allowedFilesystemTypes[fsType]
+	return ok
+}
+
+func isAllowedBlockDevice(device string) bool {
+	if !strings.HasPrefix(device, "/dev/") {
+		return false
+	}
+
+	for _, prefix := range allowedBlockDevicePrefixes {
+		if strings.HasPrefix(device, prefix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Computes load average

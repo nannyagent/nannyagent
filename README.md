@@ -112,6 +112,7 @@ debug: false
 ```
 
 See [Configuration Guide](docs/CONFIGURATION.md) for all options.
+See [Logging Guide](docs/LOGGING.md) for log levels, daemon output behavior, and repeated-failure escalation.
 
 ## Command-Line Options
 

@@ -485,9 +485,7 @@ Group=root
 
 # Security hardening
 PrivateTmp=true
-## need a thorough review on this, anything else other than this fails as
-## as patching literally touches every filesystem, cannot be strict/full
-ProtectSystem=false
+ProtectSystem=true
 ReadWritePaths=/var/lib/nannyagent
 NoNewPrivileges=false
 AmbientCapabilities=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON

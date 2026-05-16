@@ -29,9 +29,6 @@ func DefaultAgentConfig() *AgentConfig {
 	}
 }
 
-//
-// LinuxDiagnosticAgent represents the main diagnostic agent
-
 // LinuxDiagnosticAgent represents the main diagnostic agent
 type LinuxDiagnosticAgent struct {
 	model           string
@@ -208,17 +205,7 @@ func (a *LinuxDiagnosticAgent) diagnoseIssueInternal(issue string) error {
 
 		logging.Debug("AI Response: %s", content)
 
-		// Strip markdown code blocks if present
-		content = strings.TrimSpace(content)
-		if strings.HasPrefix(content, "```json") {
-			content = strings.TrimPrefix(content, "```json")
-			content = strings.TrimSuffix(content, "```")
-			content = strings.TrimSpace(content)
-		} else if strings.HasPrefix(content, "```") {
-			content = strings.TrimPrefix(content, "```")
-			content = strings.TrimSuffix(content, "```")
-			content = strings.TrimSpace(content)
-		}
+		content = stripResponseCodeFence(content)
 
 		// Parse the response to determine next action
 		var diagnosticResp types.EBPFEnhancedDiagnosticResponse
@@ -322,8 +309,7 @@ func (a *LinuxDiagnosticAgent) diagnoseIssueInternal(issue string) error {
 			break
 		}
 
-		// If we can't parse the response, treat it as an error or unexpected format
-		logging.Error("Unexpected response format or error from AI: %s", content)
+		// Ignore unparseable payloads rather than carrying forward legacy fallback handling.
 		break
 	}
 
@@ -370,33 +356,7 @@ func (a *LinuxDiagnosticAgent) convertToTraceSpec(prog types.EBPFRequest) ebpf.T
 		}
 	}
 
-	// Determine probe type based on target and type (legacy format)
-	probeType := "p" // default to kprobe
-	target := prog.Target
-
-	if strings.HasPrefix(target, "tracepoint:") {
-		probeType = "t"
-		target = strings.TrimPrefix(target, "tracepoint:")
-	} else if strings.HasPrefix(target, "kprobe:") {
-		probeType = "p"
-		target = strings.TrimPrefix(target, "kprobe:")
-	} else if prog.Type == "tracepoint" {
-		probeType = "t"
-	} else if prog.Type == "kprobe" {
-		probeType = "p"
-	} else if prog.Type == "kretprobe" {
-		probeType = "r"
-	} else if prog.Type == "syscall" {
-		// Convert syscall names to kprobe targets
-		if !strings.HasPrefix(target, "__x64_sys_") && !strings.Contains(target, ":") {
-			if strings.HasPrefix(target, "sys_") {
-				target = "__x64_" + target
-			} else {
-				target = "__x64_sys_" + target
-			}
-		}
-		probeType = "p"
-	}
+	probeType, target := normalizeProbeTarget(prog)
 
 	return ebpf.TraceSpec{
 		ProbeType: probeType,
@@ -405,6 +365,57 @@ func (a *LinuxDiagnosticAgent) convertToTraceSpec(prog types.EBPFRequest) ebpf.T
 		Arguments: []string{},       // Start with no arguments for compatibility
 		Duration:  duration,
 		UID:       -1, // No UID filter (don't default to 0 which means root only)
+	}
+}
+
+func stripResponseCodeFence(content string) string {
+	content = strings.TrimSpace(content)
+
+	switch {
+	case strings.HasPrefix(content, "```json"):
+		content = strings.TrimPrefix(content, "```json")
+	case strings.HasPrefix(content, "```"):
+		content = strings.TrimPrefix(content, "```")
+	default:
+		return content
+	}
+
+	return strings.TrimSpace(strings.TrimSuffix(content, "```"))
+}
+
+func normalizeProbeTarget(prog types.EBPFRequest) (string, string) {
+	probeType := "p"
+	target := prog.Target
+
+	switch {
+	case strings.HasPrefix(target, "tracepoint:"):
+		return "t", strings.TrimPrefix(target, "tracepoint:")
+	case strings.HasPrefix(target, "kprobe:"):
+		return "p", strings.TrimPrefix(target, "kprobe:")
+	}
+
+	switch prog.Type {
+	case "tracepoint":
+		probeType = "t"
+	case "kretprobe":
+		probeType = "r"
+	case "syscall":
+		target = normalizeSyscallTarget(target)
+	}
+
+	return probeType, target
+}
+
+func normalizeSyscallTarget(target string) string {
+	if strings.Contains(target, ":") || strings.HasPrefix(target, "__x64_sys_") {
+		return target
+	}
+
+	switch {
+	case strings.HasPrefix(target, "sys_"):
+		return "__x64_" + target
+	default:
+		return "__x64_sys_" + target
 	}
 }
 

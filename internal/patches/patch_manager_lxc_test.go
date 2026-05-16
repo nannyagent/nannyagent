@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"nannyagent/internal/nannyapi"
 	"nannyagent/internal/types"
 )
 
@@ -126,7 +127,7 @@ func TestPatchManager_HandlePatchOperation_LXC(t *testing.T) {
 
 	// Create test server
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer test-token" {
+		if r.Header.Get(nannyapi.HeaderAuthorization) != nannyapi.BearerPrefix+"test-token" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -178,7 +179,7 @@ func TestPatchManager_HandlePatchOperation_LXC(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	mockAuth := &MockAuthManager{Token: "test-token"}
+	mockAuth := &mockAuthManager{token: "test-token"}
 	pm := NewPatchManager(ts.URL, mockAuth, "test-agent-id")
 
 	payload := types.AgentPatchPayload{

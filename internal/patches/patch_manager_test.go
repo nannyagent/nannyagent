@@ -1,9 +1,7 @@
 package patches
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,47 +9,15 @@ import (
 	"strings"
 	"testing"
 
+	"nannyagent/internal/nannyapi"
 	"nannyagent/internal/types"
 )
-
-type MockAuthManager struct {
-	Token string
-}
-
-func (m *MockAuthManager) AuthenticatedDo(method, url string, body []byte, headers map[string]string) (*http.Response, error) {
-	req, err := http.NewRequest(method, url, bytes.NewBuffer(body))
-	if err != nil {
-		return nil, err
-	}
-
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	req.Header.Set("Authorization", "Bearer "+m.Token)
-
-	return http.DefaultClient.Do(req)
-}
-
-func (m *MockAuthManager) AuthenticatedRequest(method, url string, body []byte, headers map[string]string) (int, []byte, error) {
-	resp, err := m.AuthenticatedDo(method, url, body, headers)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return resp.StatusCode, nil, err
-	}
-
-	return resp.StatusCode, respBody, nil
-}
 
 func TestPatchManager_DownloadScript(t *testing.T) {
 	// Create a test server
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check authorization header
-		if r.Header.Get("Authorization") != "Bearer test-token" {
+		if r.Header.Get(nannyapi.HeaderAuthorization) != nannyapi.BearerPrefix+"test-token" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -62,7 +28,7 @@ func TestPatchManager_DownloadScript(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	mockAuth := &MockAuthManager{Token: "test-token"}
+	mockAuth := &mockAuthManager{token: "test-token"}
 	pm := NewPatchManager(ts.URL, mockAuth, "test-agent-id")
 
 	// Create temp directory
@@ -100,7 +66,7 @@ func TestPatchManager_ValidateScript(t *testing.T) {
 	// Create a test server that returns SHA256 validation
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check authorization header
-		if r.Header.Get("Authorization") != "Bearer test-token" {
+		if r.Header.Get(nannyapi.HeaderAuthorization) != nannyapi.BearerPrefix+"test-token" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -117,7 +83,7 @@ func TestPatchManager_ValidateScript(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	mockAuth := &MockAuthManager{Token: "test-token"}
+	mockAuth := &mockAuthManager{token: "test-token"}
 	pm := NewPatchManager(ts.URL, mockAuth, "test-agent-id")
 
 	// Create temp file with known content
@@ -156,7 +122,7 @@ func TestPatchManager_ValidateScript_Mismatch(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	mockAuth := &MockAuthManager{Token: "test-token"}
+	mockAuth := &mockAuthManager{token: "test-token"}
 	pm := NewPatchManager(ts.URL, mockAuth, "test-agent-id")
 
 	// Create temp file
@@ -181,6 +147,42 @@ func TestPatchManager_ValidateScript_Mismatch(t *testing.T) {
 
 	if err != nil && !strings.Contains(err.Error(), "SHA256 mismatch") {
 		t.Errorf("Expected SHA256 mismatch error, got: %v", err)
+	}
+}
+
+func TestPatchManager_ValidateScript_StripsQueryParameters(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/scripts/test-script-id/validate":
+			resp := map[string]string{
+				"id":     "test-script-id",
+				"sha256": "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+				"name":   "test-script.sh",
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	pm := NewPatchManager(ts.URL, &mockAuthManager{token: "test-token"}, "test-agent-id")
+
+	tmpDir, err := os.MkdirTemp("", "patch-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	scriptPath := filepath.Join(tmpDir, "script.sh")
+	if err := os.WriteFile(scriptPath, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("Failed to write test file: %v", err)
+	}
+
+	err = pm.validateScript("/api/files/collection/test-script-id/script.sh?download=1", scriptPath)
+	if err != nil {
+		t.Fatalf("validateScript with query params failed: %v", err)
 	}
 }
 
@@ -219,7 +221,7 @@ func TestPatchManager_HandlePatchOperation_DryRun(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	mockAuth := &MockAuthManager{Token: "test-token"}
+	mockAuth := &mockAuthManager{token: "test-token"}
 	pm := NewPatchManager(ts.URL, mockAuth, "test-agent-id")
 
 	payload := types.AgentPatchPayload{

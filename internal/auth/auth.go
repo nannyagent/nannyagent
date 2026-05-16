@@ -1,11 +1,9 @@
 package auth
 
 import (
-	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -14,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shirou/gopsutil/v3/host"
-
 	"nannyagent/internal/config"
+	"nannyagent/internal/hostinfo"
 	"nannyagent/internal/logging"
+	"nannyagent/internal/nannyapi"
 	"nannyagent/internal/types"
 )
 
@@ -30,6 +28,17 @@ const (
 	// Polling configuration for NannyAPI device auth flow
 	MaxPollAttempts = 60 // 5 minutes (60 * 5 seconds)
 	PollInterval    = 5 * time.Second
+
+	authFailureLogThreshold = logging.DefaultRepeatedFailureThreshold
+	authFailureLogInterval  = logging.DefaultRepeatedFailureInterval
+)
+
+type authIssueKind int
+
+const (
+	authIssueTransientRefresh authIssueKind = iota
+	authIssueInvalidRefreshToken
+	authIssueMissingRefreshToken
 )
 
 // AuthManager handles all NannyAPI authentication operations
@@ -50,6 +59,10 @@ type AuthManager struct {
 	// This allows us to increase delay between retries up to a maximum.
 	// The agent will NEVER give up - it just waits longer between attempts.
 	retryAttempts int
+
+	transientRefreshFailures  int
+	invalidRefreshTokenEvents int
+	missingRefreshTokenEvents int
 }
 
 // isConnectionError checks if an error indicates a connection-level issue
@@ -126,25 +139,7 @@ func (am *AuthManager) calculateBackoff() time.Duration {
 	tc := am.config.HTTPTransport
 	am.mu.RUnlock()
 
-	initialDelay := time.Duration(tc.InitialRetryDelaySec) * time.Second
-	maxDelay := time.Duration(tc.MaxRetryDelaySec) * time.Second
-
-	if attempts <= 0 {
-		return initialDelay
-	}
-
-	// Cap attempts to prevent overflow (2^30 is already huge)
-	if attempts > 30 {
-		return maxDelay
-	}
-
-	// Exponential backoff: initial * 2^attempts
-	// Cap at maxDelay
-	backoff := initialDelay * time.Duration(1<<uint(attempts))
-	if backoff > maxDelay || backoff <= 0 { // Check for overflow too
-		backoff = maxDelay
-	}
-	return backoff
+	return calculateBackoff(attempts, tc)
 }
 
 // incrementRetryAttempts increases the retry counter for backoff calculation.
@@ -159,6 +154,43 @@ func (am *AuthManager) resetRetryAttempts() {
 	am.mu.Lock()
 	am.retryAttempts = 0
 	am.mu.Unlock()
+}
+
+func (am *AuthManager) recordAuthIssue(kind authIssueKind) int {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	switch kind {
+	case authIssueTransientRefresh:
+		am.transientRefreshFailures++
+		am.invalidRefreshTokenEvents = 0
+		am.missingRefreshTokenEvents = 0
+		return am.transientRefreshFailures
+	case authIssueInvalidRefreshToken:
+		am.invalidRefreshTokenEvents++
+		am.transientRefreshFailures = 0
+		am.missingRefreshTokenEvents = 0
+		return am.invalidRefreshTokenEvents
+	case authIssueMissingRefreshToken:
+		am.missingRefreshTokenEvents++
+		am.transientRefreshFailures = 0
+		am.invalidRefreshTokenEvents = 0
+		return am.missingRefreshTokenEvents
+	default:
+		return 0
+	}
+}
+
+func (am *AuthManager) resetAuthIssueTracking() {
+	am.mu.Lock()
+	am.transientRefreshFailures = 0
+	am.invalidRefreshTokenEvents = 0
+	am.missingRefreshTokenEvents = 0
+	am.mu.Unlock()
+}
+
+func shouldEscalateAuthFailure(attempt int) bool {
+	return logging.ShouldLogRepeatedFailure(attempt, authFailureLogThreshold, authFailureLogInterval)
 }
 
 // createTransport builds an HTTP transport using config settings.
@@ -213,10 +245,7 @@ func (am *AuthManager) resetTransport() {
 
 	// Create completely new transport and client
 	am.transport = createTransport(am.config)
-	am.client = &http.Client{
-		Transport: am.transport,
-		Timeout:   5 * time.Minute,
-	}
+	am.client = newHTTPClient(am.transport)
 
 	// Reset error counter, but keep retry attempts for backoff
 	am.consecutiveConnErrors = 0
@@ -266,11 +295,7 @@ func NewAuthManager(cfg *config.Config) *AuthManager {
 		config:    cfg,
 		baseURL:   baseURL,
 		transport: transport,
-		client: &http.Client{
-			Transport: transport,
-			// Increased default timeout for investigations/LLM responses
-			Timeout: 5 * time.Minute,
-		},
+		client:    newHTTPClient(transport),
 	}
 }
 
@@ -300,38 +325,17 @@ func (am *AuthManager) EnsureTokenStorageDir() error {
 func (am *AuthManager) StartDeviceAuthorization() (*types.DeviceAuthResponse, error) {
 	logging.Info("Starting NannyAPI device authorization flow...")
 
-	// Create the device auth request
 	payload := types.DeviceAuthRequest{
-		Action: "device-auth-start",
+		Action: nannyapi.ActionDeviceAuthStart,
 	}
 
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	// Send request to NannyAPI /api/agent endpoint
-	url := fmt.Sprintf("%s/api/agent", am.baseURL)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := am.getClient().Do(req)
+	statusCode, body, err := postJSON(am.getClient(), am.agentAPIURL(), payload, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start device authorization: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("device authorization failed with status %d: %s", resp.StatusCode, string(body))
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("device authorization failed with status %d: %s", statusCode, string(body))
 	}
 
 	var deviceResp types.DeviceAuthResponse
@@ -347,38 +351,18 @@ func (am *AuthManager) StartDeviceAuthorization() (*types.DeviceAuthResponse, er
 func (am *AuthManager) AuthorizeDeviceCode(userCode string) error {
 	logging.Info("Authorizing device code with user code: %s", userCode)
 
-	// Create authorize request
 	payload := types.AuthorizeRequest{
-		Action:   "authorize",
+		Action:   nannyapi.ActionAuthorize,
 		UserCode: userCode,
 	}
 
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/api/agent", am.baseURL)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := am.getClient().Do(req)
+	statusCode, body, err := postJSON(am.getClient(), am.agentAPIURL(), payload, nil)
 	if err != nil {
 		return fmt.Errorf("failed to authorize device code: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("device code authorization failed with status %d: %s", resp.StatusCode, string(body))
+	if statusCode != http.StatusOK {
+		return fmt.Errorf("device code authorization failed with status %d: %s", statusCode, string(body))
 	}
 
 	var authResp types.AuthorizeResponse
@@ -399,47 +383,22 @@ func (am *AuthManager) PollForTokenAfterAuthorization(deviceCode string) (*types
 	logging.Info("Polling for device authorization... (will wait up to 5 minutes)")
 
 	for attempts := 0; attempts < MaxPollAttempts; attempts++ {
-		// Create register request to check if device is authorized
 		payload := types.RegisterRequest{
-			Action:         "register",
+			Action:         nannyapi.ActionRegister,
 			DeviceCode:     deviceCode,
-			Hostname:       getHostname(),
-			OSType:         getPlatform(),
-			PlatformFamily: getPlatformFamily(),
+			Hostname:       hostinfo.Hostname(),
+			OSType:         hostinfo.Platform(),
+			PlatformFamily: hostinfo.PlatformFamily(),
 			Version:        "1.0.0", // Will be updated by agent
 		}
 
-		jsonData, err := json.Marshal(payload)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal register request: %w", err)
-		}
-
-		url := fmt.Sprintf("%s/api/agent", am.baseURL)
-		req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-		if err != nil {
-			return nil, fmt.Errorf("failed to create register request: %w", err)
-		}
-
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := am.getClient().Do(req)
+		_, body, err := postJSON(am.getClient(), am.agentAPIURL(), payload, nil)
 		if err != nil {
 			logging.Warning("Poll attempt %d failed: %v", attempts+1, err)
 			time.Sleep(PollInterval)
 			continue
 		}
 
-		body, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-
-		// If response body read failed, continue polling
-		if err != nil {
-			logging.Warning("Failed to read response body: %v", err)
-			time.Sleep(PollInterval)
-			continue
-		}
-
-		// Check if registration was successful
 		var tokenResp types.TokenResponse
 		if err := json.Unmarshal(body, &tokenResp); err != nil {
 			logging.Warning("Failed to parse response: %v", err)
@@ -447,19 +406,14 @@ func (am *AuthManager) PollForTokenAfterAuthorization(deviceCode string) (*types
 			continue
 		}
 
-		// Check for errors in response
 		if tokenResp.Error != "" {
-			// If device not authorized yet, continue polling
 			if strings.Contains(tokenResp.Error, "device not authorized") {
-				// fmt.Print(".") // Removed to avoid direct stdout usage
 				time.Sleep(PollInterval)
 				continue
 			}
-			// Other errors should be returned
 			return nil, fmt.Errorf("registration failed: %s - %s", tokenResp.Error, tokenResp.ErrorDescription)
 		}
 
-		// Success! Got tokens
 		if tokenResp.AccessToken != "" {
 			logging.Info("\nAuthorization successful!")
 			return &tokenResp, nil
@@ -476,7 +430,7 @@ func (am *AuthManager) RegisterAgent(deviceCode string, hostname string, osType 
 	logging.Info("Registering agent with NannyAPI...")
 
 	payload := types.RegisterRequest{
-		Action:         "register",
+		Action:         nannyapi.ActionRegister,
 		DeviceCode:     deviceCode,
 		Hostname:       hostname,
 		Version:        version,
@@ -487,32 +441,13 @@ func (am *AuthManager) RegisterAgent(deviceCode string, hostname string, osType 
 		PlatformFamily: platformFamily,
 	}
 
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal register request: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/api/agent", am.baseURL)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create register request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := am.getClient().Do(req)
+	statusCode, body, err := postJSON(am.getClient(), am.agentAPIURL(), payload, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to register agent: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("agent registration failed with status %d: %s", resp.StatusCode, string(body))
+	if statusCode != http.StatusOK && statusCode != http.StatusCreated {
+		return nil, fmt.Errorf("agent registration failed with status %d: %s", statusCode, string(body))
 	}
 
 	var tokenResp types.TokenResponse
@@ -537,36 +472,17 @@ func (am *AuthManager) RefreshAccessToken(refreshToken string) (*types.TokenResp
 	logging.Debug("Attempting to refresh access token...")
 
 	payload := types.RefreshRequest{
-		Action:       "refresh",
+		Action:       nannyapi.ActionRefresh,
 		RefreshToken: refreshToken,
 	}
 
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal refresh request: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/api/agent", am.baseURL)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create refresh request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := am.getClient().Do(req)
+	statusCode, body, err := postJSON(am.getClient(), am.agentAPIURL(), payload, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read refresh response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("token refresh failed with status %d: %s", statusCode, string(body))
 	}
 
 	var tokenResp types.TokenResponse
@@ -586,39 +502,20 @@ func (am *AuthManager) RefreshAccessToken(refreshToken string) (*types.TokenResp
 // invalidated and a new one (plus a new access token) is returned.
 // This should be called when refresh_token_expires_in is below 7 days.
 func (am *AuthManager) RenewRefreshToken(refreshToken string) (*types.TokenResponse, error) {
-	logging.Info("Renewing refresh token...")
+	logging.Debug("Renewing refresh token...")
 
 	payload := map[string]string{
-		"action":        "renew-refresh-token",
+		"action":        nannyapi.ActionRenewRefreshToken,
 		"refresh_token": refreshToken,
 	}
 
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal renew-refresh-token request: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/api/agent", am.baseURL)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create renew-refresh-token request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := am.getClient().Do(req)
+	statusCode, body, err := postJSON(am.getClient(), am.agentAPIURL(), payload, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to renew refresh token: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read renew-refresh-token response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("renew-refresh-token failed with status %d: %s", resp.StatusCode, string(body))
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("renew-refresh-token failed with status %d: %s", statusCode, string(body))
 	}
 
 	var tokenResp types.TokenResponse
@@ -634,7 +531,7 @@ func (am *AuthManager) RenewRefreshToken(refreshToken string) (*types.TokenRespo
 		return nil, fmt.Errorf("renew-refresh-token response missing new refresh token")
 	}
 
-	logging.Info("Refresh token renewed successfully")
+	logging.Debug("Refresh token renewed successfully")
 	return &tokenResp, nil
 }
 
@@ -740,23 +637,10 @@ func (am *AuthManager) EnsureAuthenticated() (*types.AuthToken, error) {
 	if refreshToken != "" {
 		refreshResp, refreshErr := am.RefreshAccessToken(refreshToken)
 		if refreshErr == nil && refreshResp.AccessToken != "" {
-			// Preserve agent_id from existing token
-			var agentID string
-			if token != nil && token.AgentID != "" {
-				agentID = token.AgentID
-			} else if refreshResp.AgentID != "" {
-				agentID = refreshResp.AgentID
-			}
-
-			newToken := &types.AuthToken{
-				AccessToken:  refreshResp.AccessToken,
-				RefreshToken: refreshToken, // preserve existing refresh token (API doesn't rotate it on refresh)
-				TokenType:    refreshResp.TokenType,
-				ExpiresAt:    time.Now().Add(time.Duration(refreshResp.ExpiresIn) * time.Second),
-				AgentID:      agentID,
-			}
+			newToken := newAuthTokenFromResponse(token, refreshToken, refreshResp)
 
 			if saveErr := am.SaveToken(newToken); saveErr == nil {
+				am.resetAuthIssueTracking()
 				return newToken, nil
 			}
 		}
@@ -855,55 +739,42 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 
 		// Check if token is expired locally and try to refresh proactively
 		if am.IsTokenExpired(token) && token.RefreshToken != "" {
-			logging.Info("Token expired locally, attempting refresh before request...")
+			logging.Debug("Token expired locally, attempting refresh before request...")
 			newTokenResp, err := am.RefreshAccessToken(token.RefreshToken)
 			if err == nil {
-				// Preserve existing refresh token if the API didn't return a new one
-				newRefreshToken := token.RefreshToken
-				if newTokenResp.RefreshToken != "" {
-					newRefreshToken = newTokenResp.RefreshToken
-				}
-				newToken := &types.AuthToken{
-					AccessToken:  newTokenResp.AccessToken,
-					RefreshToken: newRefreshToken,
-					TokenType:    newTokenResp.TokenType,
-					ExpiresAt:    time.Now().Add(time.Duration(newTokenResp.ExpiresIn) * time.Second),
-					AgentID:      token.AgentID,
-				}
+				newToken := newAuthTokenFromResponse(token, token.RefreshToken, newTokenResp)
 				if err := am.SaveToken(newToken); err == nil {
+					am.resetAuthIssueTracking()
 					token = newToken // Use new token for this request
 				} else {
 					logging.Warning("Failed to save refreshed token: %v", err)
 				}
 			} else if isRefreshTokenExpiredError(err) {
-				// Refresh token is permanently invalid - clear it and notify
-				logging.Error("═══════════════════════════════════════════════════════════════════")
-				logging.Error("REFRESH TOKEN EXPIRED OR INVALID")
-				logging.Error("Re-registration is required: sudo nannyagent --register")
-				logging.Error("═══════════════════════════════════════════════════════════════════")
+				attempt := am.recordAuthIssue(authIssueInvalidRefreshToken)
+				if shouldEscalateAuthFailure(attempt) {
+					logging.Error("Authentication requires re-registration after %d consecutive invalid refresh token failures. Run: sudo nannyagent --register", attempt)
+				} else {
+					logging.Debug("Refresh token is invalid during pre-request refresh (attempt %d): %v", attempt, err)
+				}
 				token.RefreshToken = ""
 				_ = am.SaveToken(token) // Clear the invalid refresh token
 				// Proceed with expired access token - will get 401 and wait for registration
 			} else {
-				logging.Warning("Pre-request refresh failed: %v. Proceeding with existing token...", err)
+				attempt := am.recordAuthIssue(authIssueTransientRefresh)
+				if shouldEscalateAuthFailure(attempt) {
+					logging.Warning("Pre-request token refresh has failed %d consecutive times; proceeding with the existing token", attempt)
+				} else {
+					logging.Debug("Pre-request refresh failed (attempt %d): %v", attempt, err)
+				}
 			}
 		}
 
-		req, err := http.NewRequest(method, url, bytes.NewBuffer(body))
+		req, err := newAPIRequest(method, url, body, headers)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
+			return nil, err
 		}
 
-		// Set default content type if not provided
-		if _, ok := headers["Content-Type"]; !ok {
-			req.Header.Set("Content-Type", "application/json")
-		}
-
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-
-		req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+		setBearerAuthorization(req, token.AccessToken)
 
 		client := am.getClient()
 		resp, err := client.Do(req)
@@ -932,39 +803,40 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 			continue
 		}
 
-		// Successful request - clear all error tracking
-		am.clearConnErrors()
-		am.resetRetryAttempts()
-
 		if resp.StatusCode == http.StatusUnauthorized {
 			_ = resp.Body.Close()
 
 			if token.RefreshToken == "" {
-				// No refresh token - need re-registration
-				// Log this loudly and wait for user to register
-				logging.Error("═══════════════════════════════════════════════════════════════════")
-				logging.Error("AUTHENTICATION REQUIRED: No refresh token available.")
-				logging.Error("Please run: sudo nannyagent --register")
-				logging.Error("═══════════════════════════════════════════════════════════════════")
+				attempt := am.recordAuthIssue(authIssueMissingRefreshToken)
+				if shouldEscalateAuthFailure(attempt) {
+					logging.Error("Authentication is still unavailable after %d consecutive unauthorized requests without a refresh token. Run: sudo nannyagent --register", attempt)
+				} else {
+					logging.Debug("Unauthorized request without refresh token (attempt %d)", attempt)
+				}
 
 				backoff := am.calculateBackoff()
 				am.incrementRetryAttempts()
-				logging.Warning("Waiting %v before retrying (will keep trying after registration)...", backoff)
+				if shouldEscalateAuthFailure(attempt) {
+					logging.Warning("Waiting %v before retrying authentication", backoff)
+				} else {
+					logging.Debug("Waiting %v before retrying authentication", backoff)
+				}
 				time.Sleep(backoff)
 				continue
 			}
 
 			// Try refresh
-			logging.Info("Token expired, refreshing...")
+			logging.Debug("Token expired, refreshing...")
 			newTokenResp, err := am.RefreshAccessToken(token.RefreshToken)
 			if err != nil {
 				// Check if this is a permanent failure (refresh token expired/invalid)
 				if isRefreshTokenExpiredError(err) {
-					logging.Error("═══════════════════════════════════════════════════════════════════")
-					logging.Error("REFRESH TOKEN EXPIRED OR INVALID")
-					logging.Error("The refresh token has expired or been revoked.")
-					logging.Error("Re-registration is required: sudo nannyagent --register")
-					logging.Error("═══════════════════════════════════════════════════════════════════")
+					attempt := am.recordAuthIssue(authIssueInvalidRefreshToken)
+					if shouldEscalateAuthFailure(attempt) {
+						logging.Error("Authentication requires re-registration after %d consecutive refresh token failures. Run: sudo nannyagent --register", attempt)
+					} else {
+						logging.Debug("Refresh token rejected during 401 recovery (attempt %d): %v", attempt, err)
+					}
 
 					// Clear the invalid refresh token to avoid retrying with it
 					// Keep the agent_id in the token so re-registration can preserve it
@@ -975,37 +847,36 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 
 					// Wait with max backoff - user needs to re-register
 					maxBackoff := time.Duration(am.config.HTTPTransport.MaxRetryDelaySec) * time.Second
-					logging.Warning("Waiting %v before retrying (will succeed after registration)...", maxBackoff)
+					if shouldEscalateAuthFailure(attempt) {
+						logging.Warning("Waiting %v before retrying authentication", maxBackoff)
+					} else {
+						logging.Debug("Waiting %v before retrying authentication", maxBackoff)
+					}
 					time.Sleep(maxBackoff)
 					continue
 				}
 
 				// Temporary refresh failure - wait and retry
+				attempt := am.recordAuthIssue(authIssueTransientRefresh)
 				backoff := am.calculateBackoff()
 				am.incrementRetryAttempts()
-				logging.Warning("Token refresh failed: %v. Retrying in %v", err, backoff)
+				if shouldEscalateAuthFailure(attempt) {
+					logging.Warning("Token refresh has failed %d consecutive times; retrying in %v", attempt, backoff)
+				} else {
+					logging.Debug("Token refresh failed (attempt %d): %v. Retrying in %v", attempt, err, backoff)
+				}
 				time.Sleep(backoff)
 				continue
 			}
 
-			// Preserve existing refresh token if the API didn't return a new one
-			newRefreshToken := token.RefreshToken
-			if newTokenResp.RefreshToken != "" {
-				newRefreshToken = newTokenResp.RefreshToken
-			}
-			newToken := &types.AuthToken{
-				AccessToken:  newTokenResp.AccessToken,
-				RefreshToken: newRefreshToken,
-				TokenType:    newTokenResp.TokenType,
-				ExpiresAt:    time.Now().Add(time.Duration(newTokenResp.ExpiresIn) * time.Second),
-				AgentID:      token.AgentID,
-			}
+			newToken := newAuthTokenFromResponse(token, token.RefreshToken, newTokenResp)
 			if err := am.SaveToken(newToken); err != nil {
 				logging.Warning("Failed to save new token: %v", err)
 			}
 
 			// Token refreshed - retry immediately
 			am.resetRetryAttempts()
+			am.resetAuthIssueTracking()
 			continue
 		}
 
@@ -1018,6 +889,14 @@ func (am *AuthManager) AuthenticatedDo(method, url string, body []byte, headers 
 			time.Sleep(backoff)
 			continue
 		}
+
+		// Only clear error tracking after a truly successful response.
+		// Keep retry/auth failure state intact for unauthorized and server
+		// error responses so backoff and repeated-failure escalation can
+		// accumulate across retries.
+		am.clearConnErrors()
+		am.resetRetryAttempts()
+		am.resetAuthIssueTracking()
 
 		// Success or client error (4xx except 401) - return response
 		return resp, nil
@@ -1040,46 +919,32 @@ func (am *AuthManager) AuthenticatedDoOnce(method, url string, body []byte, head
 
 	// Check if token is expired locally and try to refresh proactively
 	if am.IsTokenExpired(token) && token.RefreshToken != "" {
-		logging.Info("Token expired locally, attempting refresh before request...")
+		logging.Debug("Token expired locally, attempting refresh before request...")
 		newTokenResp, err := am.RefreshAccessToken(token.RefreshToken)
 		if err == nil {
-			// Preserve existing refresh token if the API didn't return a new one
-			newRefreshToken := token.RefreshToken
-			if newTokenResp.RefreshToken != "" {
-				newRefreshToken = newTokenResp.RefreshToken
-			}
-			newToken := &types.AuthToken{
-				AccessToken:  newTokenResp.AccessToken,
-				RefreshToken: newRefreshToken,
-				TokenType:    newTokenResp.TokenType,
-				ExpiresAt:    time.Now().Add(time.Duration(newTokenResp.ExpiresIn) * time.Second),
-				AgentID:      token.AgentID,
-			}
+			newToken := newAuthTokenFromResponse(token, token.RefreshToken, newTokenResp)
 			if err := am.SaveToken(newToken); err == nil {
+				am.resetAuthIssueTracking()
 				token = newToken // Use new token for this request
 			} else {
 				logging.Warning("Failed to save refreshed token: %v", err)
 			}
 		} else {
-			logging.Warning("Pre-request refresh failed: %v. Proceeding with existing token...", err)
+			attempt := am.recordAuthIssue(authIssueTransientRefresh)
+			if shouldEscalateAuthFailure(attempt) {
+				logging.Warning("Pre-request token refresh has failed %d consecutive times; proceeding with the existing token", attempt)
+			} else {
+				logging.Debug("Pre-request refresh failed (attempt %d): %v", attempt, err)
+			}
 		}
 	}
 
-	req, err := http.NewRequest(method, url, bytes.NewBuffer(body))
+	req, err := newAPIRequest(method, url, body, headers)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, err
 	}
 
-	// Set default content type if not provided
-	if _, ok := headers["Content-Type"]; !ok {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	setBearerAuthorization(req, token.AccessToken)
 
 	resp, err := am.getClient().Do(req)
 	if err != nil {
@@ -1090,47 +955,32 @@ func (am *AuthManager) AuthenticatedDoOnce(method, url string, body []byte, head
 	if resp.StatusCode == http.StatusUnauthorized && token.RefreshToken != "" {
 		_ = resp.Body.Close()
 
-		logging.Info("Token expired, refreshing...")
+		logging.Debug("Token expired, refreshing...")
 		newTokenResp, err := am.RefreshAccessToken(token.RefreshToken)
 		if err != nil {
 			return nil, fmt.Errorf("failed to refresh token: %w", err)
 		}
 
-		// Preserve existing refresh token if the API didn't return a new one
-		newRefreshToken := token.RefreshToken
-		if newTokenResp.RefreshToken != "" {
-			newRefreshToken = newTokenResp.RefreshToken
-		}
-		newToken := &types.AuthToken{
-			AccessToken:  newTokenResp.AccessToken,
-			RefreshToken: newRefreshToken,
-			TokenType:    newTokenResp.TokenType,
-			ExpiresAt:    time.Now().Add(time.Duration(newTokenResp.ExpiresIn) * time.Second),
-			AgentID:      token.AgentID,
-		}
+		newToken := newAuthTokenFromResponse(token, token.RefreshToken, newTokenResp)
 		if err := am.SaveToken(newToken); err != nil {
 			return nil, fmt.Errorf("failed to save new token: %w", err)
 		}
+		am.resetAuthIssueTracking()
 
 		// Retry once with new token
-		req, err = http.NewRequest(method, url, bytes.NewBuffer(body))
+		req, err = newAPIRequest(method, url, body, headers)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
+			return nil, err
 		}
-
-		if _, ok := headers["Content-Type"]; !ok {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-		req.Header.Set("Authorization", "Bearer "+newToken.AccessToken)
+		setBearerAuthorization(req, newToken.AccessToken)
 
 		resp, err = am.getClient().Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("request failed after token refresh: %w", err)
 		}
 	}
+
+	am.resetAuthIssueTracking()
 
 	return resp, nil
 }
@@ -1142,53 +992,13 @@ func (am *AuthManager) AuthenticatedDoOnce(method, url string, body []byte, head
 // The agent NEVER gives up - retry will continue indefinitely with exponential backoff.
 // usage: Prefer this over AuthenticatedDo when you need to read the full body string/JSON.
 func (am *AuthManager) AuthenticatedRequest(method, url string, body []byte, headers map[string]string) (int, []byte, error) {
-	// Infinite retry loop - agent NEVER gives up
-	for {
-		// Use AuthenticatedDo for the request (handles 401s, 500s, and transport errors during request)
-		// AuthenticatedDo itself never gives up, but if we get here there's a response to read
-		resp, err := am.AuthenticatedDo(method, url, body, headers)
-		if err != nil {
-			// AuthenticatedDo only returns errors for truly unrecoverable issues (like no token file)
-			return 0, nil, err
-		}
-
-		statusCode := resp.StatusCode
-		// Read the body
-		// We use a specific pattern here: read fully, then close immediately.
-		// Use io.ReadAll to ensure we get everything or fail trying.
-		respBody, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-
-		if readErr == nil {
-			// Success - clear any error tracking
-			am.clearConnErrors()
-			am.resetRetryAttempts()
-			return statusCode, respBody, nil
-		}
-
-		// If read failed, the response is unusable.
-		// Check if it's a connection-level error
-		if isConnectionError(readErr) {
-			// Track connection error and potentially reset transport
-			if am.recordConnError() {
-				logging.Info("Transport reset triggered by response read error: %v", readErr)
-			}
-
-			// Calculate backoff and wait - never give up
-			backoff := am.calculateBackoff()
-			am.incrementRetryAttempts()
-			logging.Warning("Response read error: %v. Retrying in %v (will never give up)", readErr, backoff)
-			time.Sleep(backoff)
-			continue
-		}
-
-		// Non-connection read error - also retry with backoff
-		backoff := am.calculateBackoff()
-		am.incrementRetryAttempts()
-		logging.Warning("Failed to read response body: %v. Retrying in %v", readErr, backoff)
-		am.getClient().CloseIdleConnections()
-		time.Sleep(backoff)
-	}
+	return authenticatedRequestWithRetry(am, func() (*http.Response, error) {
+		return am.AuthenticatedDo(method, url, body, headers)
+	}, responseRetryLogConfig{
+		transportResetFormat: "Transport reset triggered by response read error: %v",
+		connectionReadFormat: "Response read error: %v. Retrying in %v (will never give up)",
+		readFormat:           "Failed to read response body: %v. Retrying in %v",
+	})
 }
 
 // Helper functions
@@ -1218,31 +1028,26 @@ func (am *AuthManager) loadRefreshTokenFromBackup() (string, error) {
 	return refreshToken, nil
 }
 
-func getHostname() string {
-	if hostname, err := os.Hostname(); err == nil {
-		return hostname
-	}
-	return "unknown"
+func (am *AuthManager) agentAPIURL() string {
+	return am.baseURL + nannyapi.EndpointAgent
 }
 
-func getPlatform() string {
-	// Get platform from GOOS environment variable or default
-	platform := os.Getenv("GOOS")
-	if platform == "" {
-		// Try to detect from uname
-		platform = "linux" // Default for NannyAgent
+func newAuthTokenFromResponse(current *types.AuthToken, fallbackRefreshToken string, response *types.TokenResponse) *types.AuthToken {
+	refreshToken := fallbackRefreshToken
+	if response.RefreshToken != "" {
+		refreshToken = response.RefreshToken
 	}
-	return platform
-}
 
-func getPlatformFamily() string {
-	platform, family, _, err := host.PlatformInformation()
-	if err != nil {
-		return "unknown"
+	agentID := response.AgentID
+	if current != nil && current.AgentID != "" {
+		agentID = current.AgentID
 	}
-	// If family is empty, use platform
-	if family == "" {
-		return platform
+
+	return &types.AuthToken{
+		AccessToken:  response.AccessToken,
+		RefreshToken: refreshToken,
+		TokenType:    response.TokenType,
+		ExpiresAt:    time.Now().Add(time.Duration(response.ExpiresIn) * time.Second),
+		AgentID:      agentID,
 	}
-	return family
 }

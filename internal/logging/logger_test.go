@@ -337,3 +337,31 @@ func TestLogger_SyslogOnly_InstanceFlag(t *testing.T) {
 		t.Error("Message should not appear when instance syslog-only flag is set")
 	}
 }
+
+func TestShouldLogRepeatedFailure(t *testing.T) {
+	tests := []struct {
+		name         string
+		attempt      int
+		firstVisible int
+		repeatEvery  int
+		want         bool
+	}{
+		{name: "zero attempt", attempt: 0, firstVisible: 3, repeatEvery: 10, want: false},
+		{name: "below threshold", attempt: 2, firstVisible: 3, repeatEvery: 10, want: false},
+		{name: "at threshold", attempt: 3, firstVisible: 3, repeatEvery: 10, want: true},
+		{name: "between threshold and interval", attempt: 7, firstVisible: 3, repeatEvery: 10, want: false},
+		{name: "first repeated interval", attempt: 13, firstVisible: 3, repeatEvery: 10, want: true},
+		{name: "no repeat interval only threshold", attempt: 4, firstVisible: 3, repeatEvery: 0, want: false},
+		{name: "always visible from first with interval", attempt: 1, firstVisible: 1, repeatEvery: 5, want: true},
+		{name: "visible at repeated interval from first", attempt: 6, firstVisible: 1, repeatEvery: 5, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ShouldLogRepeatedFailure(tt.attempt, tt.firstVisible, tt.repeatEvery)
+			if got != tt.want {
+				t.Errorf("ShouldLogRepeatedFailure(%d, %d, %d) = %v, want %v", tt.attempt, tt.firstVisible, tt.repeatEvery, got, tt.want)
+			}
+		})
+	}
+}

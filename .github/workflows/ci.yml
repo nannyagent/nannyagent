@@ -33,6 +33,9 @@ jobs:
     - name: Run tests
       run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
 
+    - name: Enforce exec allowlist
+      run: go test ./internal/safety -run TestExecUsageAllowlist -count=1
+
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
       with:
