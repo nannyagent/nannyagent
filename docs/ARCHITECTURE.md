@@ -16,12 +16,10 @@
 
 ## Overview
 
-NannyAgent is a Linux diagnostic agent built in Go that combines AI-powered diagnostics with deep eBPF kernel monitoring. It runs as a daemon on Linux hosts and Proxmox VE nodes, providing:
+NannyAgent is a Linux diagnostic agent built in Go that combines AI-powered diagnostics with deep eBPF kernel monitoring. It runs as a daemon on Linux hosts, providing:
 
 - **AI-Powered Diagnostics**: Real-time issue analysis using AI APIs behind Tensorzero gateway
 - **eBPF Monitoring**: Kernel-level tracing for network, processes, files, and security events
-- **Proxmox Integration**: Automated collection of cluster, node, LXC, and QEMU-VM data
-- **Patch Management**: Secure script execution for system remediation
 - **Metrics Collection**: Comprehensive system metrics ingestion
 
 ## System Architecture
@@ -73,10 +71,10 @@ NannyAgent is a Linux diagnostic agent built in Go that combines AI-powered diag
 │ │  Manager   │  │          │  │              │ │  (SSE)   │    │         │
 │ └────────────┘  └──────────┘  └─────────────┘  └──────────┘    │         │
 │                                                                │         │
-│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐    │         │
-│  │   Metrics    │  │   Proxmox    │  │  Patch Manager     │    │         │
-│  │  Collector   │  │  Manager     │  │                    │    │         │
-│  └──────────────┘  └──────────────┘  └────────────────────┘    │         │
+│  ┌──────────────┐                                             │         │
+│  │   Metrics    │                                             │         │
+│  │  Collector   │                                             │         │
+│  └──────────────┘                                             │         │
 └─────────────────────────────────────────────────────────────────────────-┘
                              │
                              ▼
@@ -84,8 +82,6 @@ NannyAgent is a Linux diagnostic agent built in Go that combines AI-powered diag
           │              Linux Kernel & System                   │
           │  - eBPF Subsystem (bpftrace)                         │
           │  - System Metrics (gopsutil)                         │
-          │  - Proxmox VE APIs (pvesh, pct)                      │
-          │  - Container Runtime (LXC)                           │
           └──────────────────────────────────────────────────────┘
 ```
 
@@ -158,7 +154,6 @@ Centralized configuration management with environment variable overrides.
 - `TOKEN_PATH`: Token storage location (default: `/var/lib/nannyagent/token.json`)
 - `DEBUG`: Enable debug logging
 - `METRICS_INTERVAL`: Metrics collection interval (default: 30s)
-- `PROXMOX_INTERVAL`: Proxmox data collection interval (default: 300s)
 
 ### 4. Diagnostic Agent
 
@@ -378,8 +373,7 @@ Maintains persistent SSE (Server-Sent Events) connection for real-time communica
      │    {                                    │
      │      "clientId": "abc123",              │
      │      "subscriptions": [                 │
-     │        "investigations",                │
-     │        "patch_operations"               │
+     │        "investigations"                 │
      │      ]                                  │
      │    }                                    │
      ├────────────────────────────────────────>│
@@ -413,22 +407,6 @@ Maintains persistent SSE (Server-Sent Events) connection for real-time communica
     "user_prompt": "PostgreSQL is slow",
     "agent_id": "agent-123",
     "status": "pending"
-  }
-}
-```
-
-2. **Patch Operation Events:**
-```json
-{
-  "action": "create",
-  "record": {
-    "id": "patch-op-456",
-    "mode": "dry-run",
-    "script_id": "patch-001",
-    "script_url": "/api/patches/patch-001/script",
-    "script_args": "--verbose",
-    "lxc_id": "lxc-100",
-    "vmid": "100"
   }
 }
 ```
@@ -471,208 +449,6 @@ Authorization: Bearer <access_token>
 ```
 
 **Collection Schedule:** Every 30 seconds (configurable via `METRICS_INTERVAL`)
-
-### 10. Proxmox Manager
-
-Collects Proxmox VE infrastructure data for monitoring and management.
-
-**Data Collection Targets:**
-
-1. **Cluster Information** (`CollectClusterInfo`)
-   - Cluster name and ID
-   - Node count
-   - Quorum status
-   - Version
-
-2. **Node Information** (`CollectNodeInfo`)
-   - Node name and ID
-   - IP address
-   - Online status
-   - PVE version
-
-3. **LXC Containers** (`CollectLXCInfo`)
-   - Container ID and name
-   - Status (running, stopped)
-   - Uptime, CPU cores, memory
-   - Network interfaces and IPs
-   - Disk configuration
-
-4. **QEMU VMs** (`CollectQemuInfo`)
-   - VM ID and name
-   - Status, uptime
-   - CPU cores, memory
-   - Disk configuration
-   - Network setup
-
-**Proxmox API Commands Used:**
-```bash
-# Cluster status
-pvesh get /cluster/status --output-format json
-
-# Cluster resources
-pvesh get /cluster/resources --output-format json
-
-# Node configuration
-pvesh get /nodes/{node}/status --output-format json
-
-# LXC configuration
-pvesh get /nodes/{node}/lxc/{vmid}/config --output-format json
-
-# QEMU configuration
-pvesh get /nodes/{node}/qemu/{vmid}/config --output-format json
-```
-
-**Ingestion Endpoints:**
-
-| Endpoint | Method | Data Type |
-|----------|--------|-----------|
-| `/api/proxmox/cluster` | POST | Cluster info |
-| `/api/proxmox/node` | POST | Node info |
-| `/api/proxmox/lxc` | POST | LXC container |
-| `/api/proxmox/qemu` | POST | QEMU VM |
-
-**Collection Schedule:** Every 300 seconds / 5 minutes (configurable via `PROXMOX_INTERVAL`)
-
-**Example LXC Data:**
-```json
-{
-  "name": "web-prod-01",
-  "lxc_id": "lxc/100",
-  "status": "running",
-  "uptime": 86400,
-  "vmid": 100,
-  "node": "pve-node-01",
-  "cpu_cores": 4,
-  "memory_mb": 8192,
-  "rootfs": "local-lvm:vm-100-disk-0,size=32G",
-  "swap_mb": 2048,
-  "ostype": "ubuntu",
-  "arch": "amd64",
-  "hostname": "web-prod-01",
-  "searchdomain": "example.com",
-  "nameserver": "8.8.8.8 8.8.4.4",
-  "features": "nesting=1,keyctl=1",
-  "unprivileged": true,
-  "tags": "production,web"
-}
-```
-
-### 11. Patch Manager
-
-Executes patch scripts for system remediation with security validation.
-
-**Patch Operation Flow:**
-```
-┌──────────────────────────────────────────────────────────────────┐
-│ 1. Receive Patch Operation (via SSE)                             │
-│    {                                                             │
-│      "operation_id": "patch-op-123",                             │
-│      "mode": "dry-run",                                          │
-│      "script_url": "/api/patches/patch-001/script",              │
-│      "script_id": "patch-001",                                   │
-│      "lxc_id": "lxc-100",                                        │
-│      "vmid": "100"                                               │
-│    }                                                             │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 2. Create Temp Directory                                         │
-│    /tmp/nanny-patch-XXXXXX/                                      │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 3. Download Script                                               │
-│    GET /api/patches/patch-001/script                             │
-│    Authorization: Bearer <token>                                 │
-│    -> /tmp/nanny-patch-XXXXXX/patch_script                       │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 4. Validate SHA256                                               │
-│    GET /api/patches/patch-001/sha256                             │
-│    Compare with downloaded script hash                           │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 5. Make Executable                                               │
-│    chmod 0700 /tmp/nanny-patch-XXXXXX/patch_script               │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 6. Execute Script                                                │
-│                                                                  │
-│    Host Execution:                                               │
-│    ./patch_script --dry-run                                      │
-│                                                                  │
-│    LXC Execution:                                                │
-│    pct exec 100 -- bash -s -- --dry-run < patch_script           │
-│                                                                  │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 7. Collect Outputs                                               │
-│    - Capture stdout (JSON package list if available)             │
-│    - Capture stderr (errors/warnings)                            │
-│    - Record exit code                                            │
-│    - Measure duration                                            │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 8. Upload Results                                                │
-│    POST /api/patches/patch-op-123/results                        │
-│    Authorization: Bearer <token>                                 │
-│    Content-Type: multipart/form-data                             │
-│                                                                  │
-│    Fields:                                                       │
-│    - metadata: JSON result object                                │
-│    - stdout: stdout.txt file                                     │
-│    - stderr: stderr.txt file                                     │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 9. Cleanup                                                       │
-│    rm -rf /tmp/nanny-patch-XXXXXX/                               │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-**Security Features:**
-- SHA256 hash validation before execution
-- Restricted file permissions (0700)
-- Temporary directory isolation
-- Output size limits
-- Timeout protection
-- No shell expansion in LXC execution
-
-**Execution Modes:**
-
-1. **Dry-Run Mode** (`--dry-run`): Simulate changes without applying
-2. **Apply Mode** (default): Apply changes to the system
-
-**Package List Format:**
-```json
-[
-  {
-    "name": "nginx",
-    "version": "1.18.0-6ubuntu14.3",
-    "old_version": "1.18.0-6ubuntu14.2",
-    "action": "upgrade"
-  },
-  {
-    "name": "openssl",
-    "version": "1.1.1f-1ubuntu2.20",
-    "old_version": "1.1.1f-1ubuntu2.19",
-    "action": "upgrade"
-  }
-]
-```
 
 ## Data Flow
 
@@ -889,56 +665,6 @@ Content-Type: application/json
 - Failed API submission: Retry with exponential backoff
 - Token expired: Automatic token refresh and retry
 
-### Proxmox Ingestion Flow
-
-```flowchart
-Every 5 minutes (if Proxmox VE detected):
-
-┌────────────────────────────────────────────────────────────────────────────────────┐
-│                        PROXMOX INFRASTRUCTURE MONITORING                           │
-├────────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                    │
-│  ┌─────────────────┐                                                               │
-│  │ Proxmox Timer   │                                                               │
-│  │ (5min interval) │                                                               │
-│  └────────┬────────┘                                                               │
-│           │                                                                        │
-│           ▼                                                                        │
-│  ┌────────────────────────────────┐                                                │
-│  │ Detect Proxmox VE              │                                                │
-│  │ • Check /usr/bin/pveversion    │                                                │
-│  │ • Verify cluster membership    │                                                │
-│  └────────┬───────────────────────┘                                                │
-│           │                                                                        │
-│           ├──────────────────┬──────────────────┬──────────────────┐               │
-│           ▼                  ▼                  ▼                  ▼               │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐    │
-│  │ Collect Node   │  │ Collect Cluster│  │ Collect LXC    │  │ Collect QEMU   │    │
-│  │ Information    │  │ Information    │  │ Containers     │  │ VMs            │    │
-│  │                │  │                │  │                │  │                │    │
-│  │ pvesh get      │  │ pvesh get      │  │ For each LXC:  │  │ For each VM:   │    │
-│  │ /nodes/{node}/ │  │ /cluster/      │  │ pvesh get      │  │ pvesh get      │    │
-│  │ status         │  │ status         │  │ /nodes/{node}/ │  │ /nodes/{node}/ │    │
-│  │                │  │                │  │ lxc/{id}/config│  │ qemu/{id}/     │    │
-│  │                │  │                │  │                │  │ config         │    │
-│  └────────┬───────┘  └────────┬───────┘  └────────┬───────┘  └────────┬───────┘    │
-│           │                   │                   │                   │            │
-│           ▼                   ▼                   ▼                   ▼            │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐    │
-│  │ POST /api/     │  │ POST /api/     │  │ POST /api/     │  │ POST /api/     │    │
-│  │ proxmox/node   │  │ proxmox/cluster│  │ proxmox/lxc    │  │ proxmox/qemu   │    │
-│  │                │  │                │  │                │  │                │    │
-│  │ NodeInfo JSON  │  │ ClusterInfo    │  │ LXCInfo JSON   │  │ QemuInfo JSON  │    │
-│  │ (status, IP,   │  │ (name, nodes,  │  │ (ID, status,   │  │ (ID, status,   │    │
-│  │  version)      │  │  quorum)       │  │  CPU, memory,  │  │  disks, CPU,   │    │
-│  │                │  │                │  │  networking)   │  │  networking)   │    │
-│  └────────────────┘  └────────────────┘  └────────────────┘  └────────────────┘    │
-│                                                                                    │
-│  All data sent to NannyAPI with Bearer token authentication                        │
-│                                                                                    │
-└────────────────────────────────────────────────────────────────────────────────────┘
-```
-
 ## Component Interactions
 
 ### Investigation Lifecycle
@@ -1014,8 +740,7 @@ Every 5 minutes (if Proxmox VE detected):
 │    │    {                               │                              │          │
 │    │      "clientId": "abc123",         │                              │          │
 │    │      "subscriptions": [            │                              │          │
-│    │        "investigations",           │                              │          │
-│    │        "patch_operations"          │                              │          │
+│    │        "investigations"            │                              │          │
 │    │      ]                             │                              │          │
 │    │    }                               │                              │          │
 │    ├───────────────────────────────────>│                              │          │
@@ -1026,7 +751,6 @@ Every 5 minutes (if Proxmox VE detected):
 │    │ ═══ SSE Connection Active ═══      │                              │          │
 │    │                                    │                              │          │
 │    │                                    │ 5. User creates investigation│          │
-│    │                                    │      or patch operation      │          │
 │    │                                    │<─────────────────────────────┤          │
 │    │                                    │                              │          │
 │    │ 6. event: record                   │                              │          │
@@ -1152,11 +876,10 @@ The agent implements a robust **Self-Healing Connectivity** pattern to handle ne
 
 1. **Root Privileges**: Required for eBPF but validated at startup
 2. **Token Storage**: Tokens stored in `/var/lib/nannyagent/` with 0600 permissions
-3. **SHA256 Validation**: Patch scripts validated before execution
-4. **Timeout Protection**: All commands and traces have timeouts
-5. **No Shell Injection**: Commands constructed safely without shell expansion
-6. **TLS/HTTPS**: All API communication over HTTPS
-7. **OAuth Device Flow**: Industry-standard authentication
+3. **Timeout Protection**: All commands and traces have timeouts
+4. **No Shell Injection**: Commands constructed safely without shell expansion
+5. **TLS/HTTPS**: All API communication over HTTPS
+6. **OAuth Device Flow**: Industry-standard authentication
 
 ---
 

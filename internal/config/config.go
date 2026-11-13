@@ -48,7 +48,6 @@ type Config struct {
 	// Agent Configuration
 	TokenPath       string `yaml:"token_path"`
 	MetricsInterval int    `yaml:"metrics_interval"`
-	ProxmoxInterval int    `yaml:"proxmox_interval"`
 
 	// Static Token Authentication (alternative to OAuth2)
 	// When set, bypasses the OAuth2 device flow entirely.
@@ -88,7 +87,6 @@ type CLIFlags struct {
 	PortalURL       string
 	TokenPath       string
 	MetricsInterval int
-	ProxmoxInterval int
 	AgentID         string
 	Debug           bool
 	DebugSet        bool // tracks whether --debug was explicitly passed
@@ -110,7 +108,6 @@ func ParseCLIFlags() *CLIFlags {
 	flag.StringVar(&f.PortalURL, "portal-url", "", "Portal URL for device authorization")
 	flag.StringVar(&f.TokenPath, "token-path", "", "Token storage path")
 	flag.IntVar(&f.MetricsInterval, "metrics-interval", 0, "Metrics collection interval in seconds")
-	flag.IntVar(&f.ProxmoxInterval, "proxmox-interval", 0, "Proxmox data collection interval in seconds")
 	flag.StringVar(&f.AgentID, "agent-id", "", "Agent ID (for static token registration)")
 	flag.BoolVar(&f.Debug, "debug", false, "Enable debug mode")
 
@@ -142,9 +139,6 @@ func (c *Config) ApplyCLIFlags(f *CLIFlags) {
 	}
 	if f.MetricsInterval > 0 {
 		c.MetricsInterval = f.MetricsInterval
-	}
-	if f.ProxmoxInterval > 0 {
-		c.ProxmoxInterval = f.ProxmoxInterval
 	}
 	if f.AgentID != "" {
 		c.AgentID = f.AgentID
@@ -211,10 +205,9 @@ var DefaultConfig = Config{
 	TokenPath:                     "/var/lib/nannyagent/token.json", // Default to system directory
 	PortalURL:                     "https://nannyai.dev",            // Default portal URL
 	MetricsInterval:               30,
-	ProxmoxInterval:               5 * 60, // Default to 300 seconds (5 minutes)
-	TokenRenewalThresholdDays:     7,      // Renew refresh token when < 7 days remain
-	TokenRenewalCheckIntervalSecs: 21600,  // Check every 6 hours (21600s) normally
-	TokenRenewalRetryIntervalSecs: 3600,   // Retry every 1 hour (3600s) if renewal failed
+	TokenRenewalThresholdDays:     7,     // Renew refresh token when < 7 days remain
+	TokenRenewalCheckIntervalSecs: 21600, // Check every 6 hours (21600s) normally
+	TokenRenewalRetryIntervalSecs: 3600,  // Retry every 1 hour (3600s) if renewal failed
 	Debug:                         false,
 	HTTPTransport:                 DefaultHTTPTransportConfig,
 }
@@ -429,9 +422,6 @@ func (c *Config) Validate() error {
 
 	// ── Intervals ───────────────────────────────────────────────────────
 	if err := validateInterval(c.MetricsInterval, "metrics_interval"); err != nil {
-		return err
-	}
-	if err := validateInterval(c.ProxmoxInterval, "proxmox_interval"); err != nil {
 		return err
 	}
 

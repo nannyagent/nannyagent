@@ -205,9 +205,6 @@ token_path: /var/lib/nannyagent/token.json
 # Metrics collection interval (seconds)
 metrics_interval: 30
 
-# Proxmox data collection interval (seconds)
-proxmox_interval: 300
-
 # Debug logging
 debug: false
 EOF

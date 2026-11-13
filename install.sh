@@ -416,8 +416,6 @@ token_path: "/var/lib/nannyagent/token.json"
 # Metrics collection interval in seconds (optional)
 # Default (in seconds): 30 for agent host metrics
 metrics_interval: 30
-# Default (in seconds): 300 for Proxmox metrics
-proxmox_interval: 300
 
 # Debug mode (optional)
 # Default: false

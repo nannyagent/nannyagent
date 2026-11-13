@@ -13,10 +13,7 @@ import (
 	"nannyagent/internal/config"
 	"nannyagent/internal/logging"
 	"nannyagent/internal/metrics"
-	"nannyagent/internal/patches"
-	"nannyagent/internal/proxmox"
 	"nannyagent/internal/realtime"
-	"nannyagent/internal/reboot"
 	"nannyagent/internal/types"
 )
 
@@ -350,23 +347,7 @@ func RunWithStaticToken(version string, cfg *config.Config, cliFlags *config.CLI
 			}
 		}
 
-		patchHandler := func(payload types.AgentPatchPayload) {
-			logging.Info("Triggering patch operation %s (mode: %s)...", payload.OperationID, payload.Mode)
-			patchManager := patches.NewPatchManager(cfg.APIBaseURL, staticAuth, agentID)
-			if err := patchManager.HandlePatchOperation(payload); err != nil {
-				logging.Error("Patch operation %s failed: %v", payload.OperationID, err)
-			}
-		}
-
-		rebootHandler := func(payload types.AgentRebootPayload) {
-			logging.Info("Triggering reboot operation %s...", payload.RebootID)
-			rebootManager := reboot.NewRebootManager(cfg.APIBaseURL, staticAuth)
-			if err := rebootManager.HandleRebootOperation(payload); err != nil {
-				logging.Error("Reboot operation %s failed: %v", payload.RebootID, err)
-			}
-		}
-
-		realtimeClient := realtime.NewClient(cfg.APIBaseURL, staticAuth, investigationHandler, patchHandler, rebootHandler)
+		realtimeClient := realtime.NewClient(cfg.APIBaseURL, staticAuth, investigationHandler)
 		realtimeClient.Start()
 	}()
 
@@ -394,9 +375,6 @@ func RunWithStaticToken(version string, cfg *config.Config, cliFlags *config.CLI
 			}
 		}
 	}()
-
-	proxmoxManager := proxmox.NewManager(cfg, staticAuth)
-	proxmoxManager.Start()
 
 	if cliFlags.Daemon {
 		if err := logging.EnableSyslogOnly(); err != nil {
@@ -464,27 +442,7 @@ func RunWithOAuth(version string, cfg *config.Config, cliFlags *config.CLIFlags)
 			}
 		}
 
-		patchHandler := func(payload types.AgentPatchPayload) {
-			logging.Info("Triggering patch operation %s (mode: %s)...", payload.OperationID, payload.Mode)
-			patchManager := patches.NewPatchManager(cfg.APIBaseURL, authManager, agentID)
-			if err := patchManager.HandlePatchOperation(payload); err != nil {
-				logging.Error("Patch operation %s failed: %v", payload.OperationID, err)
-			} else {
-				logging.Info("Patch operation %s completed successfully", payload.OperationID)
-			}
-		}
-
-		rebootHandler := func(payload types.AgentRebootPayload) {
-			logging.Info("Triggering reboot operation %s...", payload.RebootID)
-			rebootManager := reboot.NewRebootManager(cfg.APIBaseURL, authManager)
-			if err := rebootManager.HandleRebootOperation(payload); err != nil {
-				logging.Error("Reboot operation %s failed: %v", payload.RebootID, err)
-			} else {
-				logging.Info("Reboot operation %s completed successfully", payload.RebootID)
-			}
-		}
-
-		realtimeClient := realtime.NewClient(cfg.APIBaseURL, authManager, investigationHandler, patchHandler, rebootHandler)
+		realtimeClient := realtime.NewClient(cfg.APIBaseURL, authManager, investigationHandler)
 		realtimeClient.Start()
 	}()
 
@@ -583,9 +541,6 @@ func RunWithOAuth(version string, cfg *config.Config, cliFlags *config.CLIFlags)
 			nextCheck = time.Now().Add(normalCheckInterval)
 		}
 	}()
-
-	proxmoxManager := proxmox.NewManager(cfg, authManager)
-	proxmoxManager.Start()
 
 	if cliFlags.Daemon {
 		if err := logging.EnableSyslogOnly(); err != nil {

@@ -13,8 +13,6 @@
 - [Realtime (SSE) API](#realtime-sse-api)
 - [Investigations API](#investigations-api)
 - [Metrics API](#metrics-api)
-- [Proxmox API](#proxmox-api)
-- [Patches API](#patches-api)
 - [Error Handling](#error-handling)
 - [Rate Limiting](#rate-limiting)
 
@@ -24,7 +22,6 @@ NannyAgent communicates with the NannyAPI backend using multiple protocols:
 
 1. **REST API** - Standard HTTP requests for CRUD operations
 2. **Server-Sent Events (SSE)** - Real-time push notifications from server
-3. **Multipart Upload** - File uploads for patch results
 
 **Base URL Configuration:**
 ```bash
@@ -327,7 +324,7 @@ Content-Type: application/json
 
 {
   "clientId": "client-abc123xyz",
-  "subscriptions": ["investigations", "patch_operations", "reboot_operations"]
+  "subscriptions": ["investigations"]
 }
 ```
 
@@ -361,61 +358,11 @@ data: {"action":"create","record":{"id":"inv-123","agent_id":"agent-123","user_p
 }
 ```
 
-#### Patch Operation Events
-
-```http
-event: record
-data: {"action":"create","record":{"id":"patch-op-456","agent_id":"agent-123","mode":"dry-run","script_id":"patch-001","script_url":"/api/patches/patch-001/script","script_args":"--verbose","lxc_id":"lxc-100","vmid":"100"}}
-
-```
-
-**Parsed Event:**
-```json
-{
-  "action": "create",
-  "record": {
-    "id": "patch-op-456",
-    "agent_id": "agent-123",
-    "mode": "dry-run",
-    "script_id": "patch-001",
-    "script_url": "/api/patches/patch-001/script",
-    "script_args": "--verbose",
-    "lxc_id": "lxc-100",
-    "vmid": "100"
-  }
-}
-```
-
-#### Reboot Operation Events
-
-```http
-event: record
-data: {"action":"create","record":{"id":"reboot-op-789","agent_id":"agent-123","lxc_id":"lxc-100","vmid":"100","reason":"Security patches applied","timeout_seconds":300,"requested_at":"2025-12-30T10:30:00Z"}}
-
-```
-
-**Parsed Event:**
-```json
-{
-  "action": "create",
-  "record": {
-    "id": "reboot-op-789",
-    "agent_id": "agent-123",
-    "lxc_id": "lxc-100",
-    "vmid": "100",
-    "reason": "Security patches applied",
-    "timeout_seconds": 300,
-    "requested_at": "2025-12-30T10:30:00Z"
-  }
-}
-```
-
 ### Connection Management
 
 **Features:**
 - Automatic reconnection with exponential backoff on disconnect
 - Client ID tracking for subscription management
-- Multi-channel subscriptions (investigations, patch_operations, reboot_operations)
 - Graceful error handling
 - Unlimited retries - agent never gives up on reconnection
 
@@ -454,8 +401,6 @@ client := realtime.NewClient(
     baseURL,
     accessToken,
     investigationHandler,
-    patchHandler,
-    rebootHandler,
 )
 
 go client.Start() // Blocks until connection closed, auto-reconnects with backoff
@@ -665,405 +610,6 @@ Content-Type: application/json
 
 **Collection Frequency:** Every 30 seconds (default)
 
-## Proxmox API
-
-### Ingest Cluster Information
-
-```bash
-POST /api/proxmox/cluster
-Authorization: Bearer {access_token}
-Content-Type: application/json
-
-{
-  "cluster_name": "production-cluster",
-  "cluster_id": "cluster-123",
-  "nodes": 3,
-  "quorate": 1,
-  "version": 7
-}
-```
-
-### Ingest Node Information
-
-```bash
-POST /api/proxmox/node
-Authorization: Bearer {access_token}
-Content-Type: application/json
-
-{
-  "name": "pve-node-01",
-  "node_id": 1,
-  "ip": "10.0.1.10",
-  "online": 1,
-  "local": 1,
-  "level": "",
-  "pve_version": "pve-manager/7.4-3/9002ab8a"
-}
-```
-
-### Ingest LXC Container Information
-
-```bash
-POST /api/proxmox/lxc
-Authorization: Bearer {access_token}
-Content-Type: application/json
-
-{
-  "name": "web-prod-01",
-  "lxc_id": "lxc/100",
-  "status": "running",
-  "uptime": 86400,
-  "vmid": 100,
-  "node": "pve-node-01",
-  "cpu_cores": 4,
-  "memory_mb": 8192,
-  "rootfs": "local-lvm:vm-100-disk-0,size=32G",
-  "swap_mb": 2048,
-  "net0": "name=eth0,bridge=vmbr0,firewall=1,gw=10.0.1.1,hwaddr=BC:24:11:12:34:56,ip=10.0.1.100/24,type=veth",
-  "ostype": "ubuntu",
-  "arch": "amd64",
-  "hostname": "web-prod-01",
-  "searchdomain": "example.com",
-  "nameserver": "8.8.8.8 8.8.4.4",
-  "features": "nesting=1,keyctl=1",
-  "unprivileged": true,
-  "protection": false,
-  "tags": "production,web",
-  "timezone": "America/New_York"
-}
-```
-
-### Ingest QEMU VM Information
-
-```bash
-POST /api/proxmox/qemu
-Authorization: Bearer {access_token}
-Content-Type: application/json
-
-{
-  "name": "db-prod-01",
-  "qemu_id": "qemu/200",
-  "status": "running",
-  "uptime": 172800,
-  "vmid": 200,
-  "node": "pve-node-01",
-  "cpu_cores": 8,
-  "memory_mb": 32768,
-  "agent": "enabled=1",
-  "boot": "order=scsi0;ide2;net0",
-  "bootdisk": "scsi0",
-  "cores": 8,
-  "cpu": "host",
-  "machine": "pc-i440fx-7.2",
-  "ostype": "l26",
-  "sockets": 1,
-  "scsi0": "local-lvm:vm-200-disk-0,size=500G",
-  "net0": "virtio=BC:24:11:AB:CD:EF,bridge=vmbr0,firewall=1",
-  "tags": "production,database"
-}
-```
-
-**Collection Frequency:** Every 300 seconds / 5 minutes (default)
-
-## Patches API
-
-The Patches API manages **OS update operations** delivered via realtime SSE messages. When OS updates are needed (security patches, package upgrades), the backend sends a patch operation event through the realtime connection, which the agent processes automatically.
-
-### Patch Operation Flow
-
-OS update operations are initiated by the backend and delivered to agents via Server-Sent Events (SSE):
-
-```
-1. Backend determines OS updates are needed for an agent/container
-2. Backend creates patch operation record in database
-3. Realtime SSE sends patch_operations event to subscribed agent
-4. Agent receives event, downloads script, validates SHA256, and executes
-5. Agent uploads results (stdout, stderr, package list) back to backend
-```
-
-### Realtime Patch Event (Received via SSE)
-
-When OS updates are required, the agent receives a patch operation event through its SSE connection:
-
-**Event Format:**
-```json
-{
-  "action": "create",
-  "record": {
-    "id": "patch-op-456",
-    "mode": "dry-run",
-    "script_id": "os-update-001",
-    "script_url": "/api/patches/os-update-001/script",
-    "script_args": "--verbose",
-    "lxc_id": "lxc-100",
-    "vmid": "100"
-  }
-}
-```
-
-**Field Descriptions:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `id` | string | Yes | Unique patch operation ID |
-| `mode` | string | Yes | `dry-run` (simulate) or `apply` (execute) |
-| `script_id` | string | Yes | Script identifier for download and validation |
-| `script_url` | string | Yes | API endpoint path to download script |
-| `script_args` | string | No | Optional arguments passed to script |
-| `lxc_id` | string | No | LXC container ID (e.g., "lxc-100") if targeting container |
-| `vmid` | string | No | VM/Container numeric ID (e.g., "100") |
-
-**Execution Modes:**
-
-1. **Dry-Run Mode** (`--dry-run`):
-   - Simulates OS updates without applying changes
-   - Returns JSON list of packages that would be updated
-   - No system modifications
-   - Safe to run anytime for impact assessment
-
-2. **Apply Mode** (default):
-   - Actually performs OS updates on the system
-   - Applies package upgrades, security patches
-   - Modifies system state
-   - Returns JSON list of packages that were updated
-
-### Download Patch Script
-
-```bash
-GET /api/patches/{script_id}/script
-Authorization: Bearer {access_token}
-```
-
-**Response:**
-```bash
-#!/bin/bash
-# Patch script content
-set -euo pipefail
-
-MODE="${1:-apply}"
-
-if [ "$MODE" = "--dry-run" ]; then
-    echo "DRY RUN: Would upgrade nginx"
-    echo '[{"name":"nginx","version":"1.18.0-6ubuntu14.3","old_version":"1.18.0-6ubuntu14.2","action":"upgrade"}]'
-else
-    apt-get update
-    apt-get upgrade -y nginx
-    echo '[{"name":"nginx","version":"1.18.0-6ubuntu14.3","old_version":"1.18.0-6ubuntu14.2","action":"upgrade"}]'
-fi
-```
-
-### Get Script SHA256
-
-```bash
-GET /api/patches/{script_id}/sha256
-Authorization: Bearer {access_token}
-```
-
-**Response:**
-```json
-{
-  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-}
-```
-
-### Upload Patch Results
-
-```bash
-POST /api/patches/{operation_id}/results
-Authorization: Bearer {access_token}
-Content-Type: multipart/form-data
-
---boundary
-Content-Disposition: form-data; name="metadata"
-Content-Type: application/json
-
-{
-  "operation_id": "patch-op-456",
-  "success": true,
-  "duration": 15234,
-  "lxc_id": "lxc-100",
-  "timestamp": "2025-12-30T10:35:00Z",
-  "package_list": [
-    {
-      "name": "nginx",
-      "version": "1.18.0-6ubuntu14.3",
-      "old_version": "1.18.0-6ubuntu14.2",
-      "action": "upgrade"
-    }
-  ]
-}
-
---boundary
-Content-Disposition: form-data; name="stdout"; filename="stdout.txt"
-Content-Type: text/plain
-
-Reading package lists...
-Building dependency tree...
-Reading state information...
-The following packages will be upgraded:
-  nginx
-1 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
-
---boundary
-Content-Disposition: form-data; name="stderr"; filename="stderr.txt"
-Content-Type: text/plain
-
-(no errors)
-
---boundary--
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Patch results uploaded successfully"
-}
-```
-
-## Reboot API
-
-The Reboot API manages **remote reboot operations** delivered via realtime SSE messages. When a system or container needs to be rebooted, the backend sends a reboot operation event through the realtime connection, which the agent processes automatically.
-
-### Reboot Operation Flow
-
-Reboot operations are initiated by the backend and delivered to agents via Server-Sent Events (SSE):
-
-```
-1. Backend determines a reboot is needed for an agent/container
-2. Backend creates reboot operation record in database with status "pending"
-3. Realtime SSE sends reboot_operations event to subscribed agent
-4. Agent receives event and acknowledges receipt (status -> "rebooting")
-5. Agent executes reboot command (systemctl reboot or pct reboot)
-6. System reboots and agent reconnects
-7. Backend detects reconnection and marks reboot as "completed"
-```
-
-### Realtime Reboot Event (Received via SSE)
-
-When a reboot is required, the agent receives a reboot operation event through its SSE connection:
-
-**Event Format:**
-```json
-{
-  "action": "create",
-  "record": {
-    "id": "reboot-op-789",
-    "agent_id": "agent-123",
-    "lxc_id": "lxc-100",
-    "vmid": "100",
-    "reason": "Security patches applied, reboot required",
-    "timeout_seconds": 300,
-    "requested_at": "2025-12-30T10:30:00Z"
-  }
-}
-```
-
-**Field Descriptions:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `id` | string | Yes | Unique reboot operation ID |
-| `agent_id` | string | Yes | Agent ID that should perform the reboot |
-| `lxc_id` | string | No | LXC container ID (e.g., "lxc-100") if targeting container |
-| `vmid` | string | No | VM/Container numeric ID (e.g., "100") - preferred over lxc_id |
-| `reason` | string | No | Human-readable reason for the reboot |
-| `timeout_seconds` | int | No | Maximum time to wait for reboot completion |
-| `requested_at` | string | Yes | ISO 8601 timestamp of when reboot was requested |
-
-**Reboot Types:**
-
-1. **Host Reboot** (no `vmid` or `lxc_id`):
-   - Reboots the entire host system
-   - Uses `systemctl reboot` with fallback to `shutdown -r now`
-   - Agent reconnects after system restart
-
-2. **Container Reboot** (`vmid` or `lxc_id` specified):
-   - Reboots only the specified LXC container
-   - Uses `pct reboot <vmid>` command
-   - Host system and agent remain running
-
-### Acknowledge Reboot
-
-After receiving a reboot event, the agent acknowledges it before executing:
-
-```bash
-POST /api/reboot/{reboot_id}/acknowledge
-Authorization: Bearer {access_token}
-```
-
-**Response:**
-```
-HTTP/1.1 204 No Content
-```
-
-The acknowledgment updates the reboot status from "pending" to "rebooting".
-
-### Report Reboot Failure
-
-If the reboot fails (e.g., command execution error), the agent reports the failure:
-
-```bash
-POST /api/reboot/{reboot_id}/fail
-Authorization: Bearer {access_token}
-Content-Type: application/json
-
-{
-  "error": "systemctl reboot failed: exit status 1"
-}
-```
-
-**Response:**
-```
-HTTP/1.1 204 No Content
-```
-
-### Reboot Status Values
-
-| Status | Description |
-|--------|-------------|
-| `pending` | Reboot requested, waiting for agent |
-| `sent` | Event sent to agent via SSE |
-| `rebooting` | Agent acknowledged, reboot in progress |
-| `completed` | Reboot successful, agent reconnected |
-| `failed` | Reboot failed, error reported |
-| `timeout` | Reboot timed out (no reconnection within timeout) |
-
-### Example: Container Reboot
-
-```bash
-# Reboot event received for container with vmid=100
-# Agent acknowledges:
-POST /api/reboot/reboot-op-789/acknowledge
-
-# Agent executes:
-pct reboot 100
-
-# If successful, container reboots and reconnects
-# If failed:
-POST /api/reboot/reboot-op-789/fail
-{
-  "error": "pct reboot 100: exit status 2: CT 100 not running"
-}
-```
-
-### Example: Host Reboot
-
-```bash
-# Reboot event received with no vmid/lxc_id
-# Agent acknowledges:
-POST /api/reboot/reboot-op-790/acknowledge
-
-# Agent executes:
-systemctl reboot
-
-# If systemctl fails, fallback to:
-shutdown -r now
-
-# System reboots, agent reconnects after startup
-# Backend marks reboot as completed upon reconnection
-```
-
 ## Error Handling
 
 ### HTTP Status Codes
@@ -1156,7 +702,6 @@ func retryWithBackoff(fn func() error, maxRetries int) error {
 
 **Current Limits:**
 - Metrics ingestion: 2 requests per minute (1 every 30 seconds)
-- Proxmox ingestion: 1 request per 5 minutes
 - Investigations: No limit (authenticated)
 - Realtime SSE: 1 connection per agent
 
@@ -1239,22 +784,11 @@ investigationHandler := func(investigationID, prompt string) {
     go agent.DiagnoseIssueWithInvestigation(prompt)
 }
 
-patchHandler := func(payload types.AgentPatchPayload) {
-    go patchManager.HandlePatchOperation(payload)
-}
-
-rebootHandler := func(payload types.AgentRebootPayload) {
-    rebootManager := reboot.NewRebootManager(baseURL, authManager)
-    go rebootManager.HandleRebootOperation(payload)
-}
-
 // Start SSE client with all handlers
 client := realtime.NewClient(
     baseURL,
     accessToken,
     investigationHandler,
-    patchHandler,
-    rebootHandler,
 )
 
 go client.Start() // Auto-reconnects with exponential backoff (30s initial, 30m max)

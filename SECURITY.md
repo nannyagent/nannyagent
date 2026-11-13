@@ -202,21 +202,13 @@ All security-sensitive code must be reviewed:
 - **Read-only access**: eBPF programs cannot modify kernel state
 - **Timeout enforcement**: Traces limited by duration parameter
 
-#### 4. Patch Script Validation
-
-- **SHA256 verification**: Scripts validated before execution to ensure they have not been tampered with at the source
-- **HTTPS-only downloads**: TLS encryption for script retrieval
-- **Temporary isolation**: Scripts executed in isolated temp directories
-- **Permission restrictions**: Scripts run with minimal required permissions
-- **Output validation**: Results sanitized before upload
-
-#### 5. TLS/HTTPS Enforcement
+#### 4. TLS/HTTPS Enforcement
 
 - All API communication over HTTPS only
 - Certificate validation enabled
 - No insecure HTTP fallback
 
-#### 6. Logging and Auditing
+#### 5. Logging and Auditing
 
 - All actions logged via syslog
 - Authentication events recorded
@@ -272,7 +264,7 @@ All security-sensitive code must be reviewed:
 2. **Day 1-2**: Acknowledgment sent to reporter
 3. **Day 3-5**: Initial assessment and severity classification
 4. **Day 6-30**: Development and testing of fix
-5. **Day 31**: Coordinated public disclosure and patch release
+5. **Day 31**: Coordinated public disclosure and fixed release
 
 ### Severity Levels
 

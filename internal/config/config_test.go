@@ -102,7 +102,6 @@ func TestValidate_Success(t *testing.T) {
 	config := &Config{
 		APIBaseURL:                    "https://test-api.nannyai.dev",
 		MetricsInterval:               30,
-		ProxmoxInterval:               300,
 		HTTPTransport:                 DefaultHTTPTransportConfig,
 		TokenRenewalThresholdDays:     DefaultConfig.TokenRenewalThresholdDays,
 		TokenRenewalCheckIntervalSecs: DefaultConfig.TokenRenewalCheckIntervalSecs,
@@ -399,7 +398,6 @@ func TestValidate_StaticToken(t *testing.T) {
 				APIBaseURL:                    "https://test.nannyai.dev",
 				StaticToken:                   tt.staticToken,
 				MetricsInterval:               30,
-				ProxmoxInterval:               300,
 				HTTPTransport:                 DefaultHTTPTransportConfig,
 				TokenRenewalThresholdDays:     DefaultConfig.TokenRenewalThresholdDays,
 				TokenRenewalCheckIntervalSecs: DefaultConfig.TokenRenewalCheckIntervalSecs,
@@ -422,7 +420,6 @@ func TestApplyCLIFlags(t *testing.T) {
 		PortalURL:       "https://yaml.portal.dev",
 		TokenPath:       "/yaml/token.json",
 		MetricsInterval: 30,
-		ProxmoxInterval: 300,
 		Debug:           false,
 	}
 
@@ -455,9 +452,6 @@ func TestApplyCLIFlags(t *testing.T) {
 	}
 	if cfg.TokenPath != "/yaml/token.json" {
 		t.Errorf("TokenPath = %v, want /yaml/token.json", cfg.TokenPath)
-	}
-	if cfg.ProxmoxInterval != 300 {
-		t.Errorf("ProxmoxInterval = %v, want 300", cfg.ProxmoxInterval)
 	}
 }
 
@@ -572,7 +566,6 @@ func validConfig() *Config {
 		PortalURL:                     "https://nannyai.dev",
 		TokenPath:                     "/var/lib/nannyagent/token.json",
 		MetricsInterval:               30,
-		ProxmoxInterval:               300,
 		HTTPTransport:                 DefaultHTTPTransportConfig,
 		TokenRenewalThresholdDays:     7,
 		TokenRenewalCheckIntervalSecs: 21600,
@@ -748,38 +741,6 @@ func TestValidate_MetricsInterval(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validConfig()
 			cfg.MetricsInterval = tt.value
-			err := cfg.Validate()
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Errorf("Validate() unexpected error: %v", err)
-				}
-			} else {
-				if err == nil {
-					t.Errorf("Validate() expected error containing %q, got nil", tt.wantErr)
-				} else if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Errorf("Validate() error = %q, want it to contain %q", err.Error(), tt.wantErr)
-				}
-			}
-		})
-	}
-}
-
-func TestValidate_ProxmoxInterval(t *testing.T) {
-	tests := []struct {
-		name    string
-		value   int
-		wantErr string
-	}{
-		{"valid 300s", 300, ""},
-		{"zero rejected", 0, "must be > 0"},
-		{"negative rejected", -100, "must be > 0"},
-		{"too large", MaxInterval + 1, "must be <="},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := validConfig()
-			cfg.ProxmoxInterval = tt.value
 			err := cfg.Validate()
 			if tt.wantErr == "" {
 				if err != nil {
@@ -1007,7 +968,6 @@ func TestValidate_YAMLWithInvalidValues(t *testing.T) {
 	yamlContent := `
 nannyapi_url: https://api.nannyai.dev
 metrics_interval: -10
-proxmox_interval: 300
 `
 	err := os.WriteFile(configPath, []byte(yamlContent), 0644)
 	if err != nil {
@@ -1032,13 +992,13 @@ proxmox_interval: 300
 }
 
 func TestValidate_YAMLWithOverflowInterval(t *testing.T) {
+	// Ensure absurdly large interval values are rejected instead of overflowing.
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
 	yamlContent := `
 nannyapi_url: https://api.nannyai.dev
 metrics_interval: 999999999
-proxmox_interval: 300
 `
 	err := os.WriteFile(configPath, []byte(yamlContent), 0644)
 	if err != nil {

@@ -40,10 +40,6 @@ token_path: "/var/lib/nannyagent/token.json"
 # Default: 30
 metrics_interval: 30
 
-# Proxmox cluster/VM/LXC data collection interval in seconds (optional)
-# Default: 300
-proxmox_interval: 300
-
 # ─── Refresh token renewal settings ─────────────────────────────────────────
 #
 # The refresh token has a 30-day lifetime. The agent automatically renews it

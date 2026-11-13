@@ -109,7 +109,6 @@ nannyapi_url: https://api.nannyai.dev
 portal_url: https://nannyai.dev
 token_path: /var/lib/nannyagent/token.json
 metrics_interval: 30
-proxmox_interval: 300
 debug: true
 EOF
 ```
@@ -391,7 +390,6 @@ Documentation improvements are always welcome!
 - `docs/ARCHITECTURE.md`: System architecture
 - `docs/API_INTEGRATION.md`: API documentation
 - `docs/EBPF_MONITORING.md`: eBPF monitoring guide
-- `docs/PROXMOX_INTEGRATION.md`: Proxmox integration
 - `docs/CONFIGURATION.md`: Configuration guide
 - `docs/INSTALLATION.md`: Installation instructions
 

@@ -756,6 +756,5 @@ User reports: "PostgreSQL queries are extremely slow"
 ---
 
 <div align="center">
-  <p><strong>Next:</strong> <a href="./PROXMOX_INTEGRATION.md">Proxmox Integration Guide</a></p>
   <p><em>NannyAgent - AI-Powered Linux Diagnostics</em></p>
 </div>

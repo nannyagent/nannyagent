@@ -13,9 +13,7 @@ A sophisticated Go-based agent that combines AI-powered diagnostics with eBPF ke
 - **eBPF Deep Monitoring** - Real-time kernel-level tracing (network, processes, files, I/O)
 - **Safe Command Execution** - Validated execution with timeouts and security checks (no changes made to the system)
 - **System Metrics Collection** - Comprehensive CPU, memory, disk, network metrics every 30s
-- **Proxmox Integration** - Automatic cluster, node, LXC, and QEMU-VM ingestion
 - **Realtime Communication** - Server-Sent Events for instant investigation dispatch
-- **Patch Management** - Update OS & system packages of both hosts & LXCs (including scheduling)
 - **OAuth Device Flow** - Secure agent registration and authentication
 - **Comprehensive Testing** - Unit tests and integration tests for all components
 
@@ -28,7 +26,6 @@ Comprehensive documentation is available in the [docs/](docs/) directory:
 - **[Architecture](docs/ARCHITECTURE.md)** - System design, components, and data flows
 - **[API Integration](docs/API_INTEGRATION.md)** - REST API, SSE, OAuth, and all backend endpoints
 - **[eBPF Monitoring](docs/EBPF_MONITORING.md)** - Kernel-level tracing with bpftrace
-- **[Proxmox Integration](docs/PROXMOX_INTEGRATION.md)** - Cluster, node, LXC, QEMU info ingestion
 - **[Contributing](CONTRIBUTORS.md)** - How to contribute to NannyAgent
 - **[Security Policy](SECURITY.md)** - Security practices and vulnerability reporting
 
@@ -37,7 +34,7 @@ Comprehensive documentation is available in the [docs/](docs/) directory:
 - **Operating System**: Linux only (no Docker/LXC containers)
 - **Architecture**: amd64 (x86_64) or arm64 (aarch64)
 - **Kernel Version**: Linux kernel 5.x or higher
-- **Privileges**: root access required for eBPF functionality & patching
+- **Privileges**: root access required for eBPF functionality
 - **Dependencies**: bpftrace (automatically installed by installer)
 - **Network**: Connectivity to NannyAPI backend (defaults to https://api.nannyai.dev)
 
@@ -103,9 +100,6 @@ token_path: /var/lib/nannyagent/token.json
 
 # Optional: Metrics collection interval in seconds (default: 30)
 metrics_interval: 30
-
-# Optional: Proxmox data collection interval in seconds (default: 300)
-proxmox_interval: 300
 
 # Optional: Debug logging (default: false)
 debug: false
@@ -273,7 +267,6 @@ make test
 - **OAuth Authentication**: OAuth 2.0 Device Flow
 - **TLS/HTTPS**: All API communication over HTTPS
 - **No Shell Injection**: Commands constructed safely without shell expansion
-- **Patch Validation**: SHA256 hash validation before script execution
 - **Root Privilege Checks**: Validated at startup with clear error messages
 
 ## System Metrics Collection
@@ -290,25 +283,6 @@ The agent automatically collects and sends comprehensive system metrics every 30
 - **Processes**: Active process count
 
 All metrics are sent to `/api/agent` endpoint with authentication.
-
-## Proxmox VE Monitoring
-
-For Proxmox VE environments, the agent automatically:
-
-1. **Detects Proxmox installation** via `/usr/bin/pveversion`
-2. **Collects cluster data** every 5 minutes:
-   - Cluster configuration (name, node count, quorum status)
-   - Node information (status, version, resources)
-   - LXC container details (config, networking, resources)
-   - QEMU VM details (disks, CPU, memory, network)
-
-Data is sent to dedicated Proxmox endpoints:
-- `/api/proxmox/cluster` - Cluster information
-- `/api/proxmox/node` - Node status and metrics
-- `/api/proxmox/lxc` - LXC container data
-- `/api/proxmox/qemu` - QEMU VM data
-
-See [Proxmox Integration Guide](docs/PROXMOX_INTEGRATION.md) for details.
 
 ## eBPF Monitoring
 
@@ -328,26 +302,6 @@ Deep kernel-level monitoring using bpftrace:
 - System call frequency analysis
 
 The AI automatically requests appropriate eBPF monitoring based on the issue type. See [eBPF Monitoring Guide](docs/EBPF_MONITORING.md) for comprehensive documentation.
-
-## Patch Management
-
-Secure script execution for system remediation:
-
-**Features:**
-- SHA256 validation before execution
-- Dry-run mode for testing changes
-- Host and LXC container execution
-- Output capture (stdout/stderr)
-- Package list tracking
-- Automatic cleanup
-
-**Execution Flow:**
-1. Receive patch operation via SSE
-2. Download script from backend
-3. Validate SHA256 hash
-4. Execute (dry-run or apply mode)
-5. Capture results and package changes
-6. Upload results to backend
 
 ## Architecture Overview
 
@@ -370,8 +324,6 @@ Secure script execution for system remediation:
 │  │ • Diagnostic Agent (AI orchestration)               │  │
 │  │ • eBPF Trace Manager (kernel monitoring)            │  │
 │  │ • Metrics Collector (system metrics)                │  │
-│  │ • Proxmox Manager (infrastructure monitoring)       │  │
-│  │ • Patch Manager (secure remediation)                │  │
 │  │ • Realtime Client (SSE for instant dispatch)        │  │
 │  │ • Investigations Client (TensorZero proxy)          │  │
 │  └─────────────────────────────────────────────────────┘  │
@@ -382,7 +334,6 @@ Secure script execution for system remediation:
         │  Linux Kernel & System        │
         │  • eBPF (bpftrace)            │
         │  • System Metrics (gopsutil)  │
-        │  • Proxmox APIs (pvesh, pct)  │
         └───────────────────────────────┘
 ```
 

@@ -1,4 +1,0 @@
-[
-  {"type": "lxc", "node": "node3", "vmid": 100, "name": "testcontainer", "id": "lxc/100", "status": "running", "uptime": 1000},
-  {"type": "qemu", "node": "node3", "vmid": 103, "name": "tensorzero", "id": "qemu/103", "status": "running", "uptime": 2000}
-]

@@ -34,7 +34,6 @@ CONFIG OVERRIDES (higher priority than config.yaml):
   --portal-url <url>          Portal URL for device authorization
   --token-path <path>         Token storage path
   --metrics-interval <secs>   Metrics collection interval
-  --proxmox-interval <secs>   Proxmox data collection interval
   --agent-id <id>             Agent ID (for static token mode)
   --debug                     Enable debug mode
 
