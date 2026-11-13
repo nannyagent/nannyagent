@@ -285,7 +285,7 @@ func (c *Collector) IngestMetrics(agentID string, authManager interface {
 		OSInfo:         systemMetrics.Platform,
 		OSVersion:      systemMetrics.PlatformVersion,
 		OSType:         systemMetrics.OSType,
-		PlatformFamily: systemMetrics.PlatformFamily, // Required for patch management
+		PlatformFamily: systemMetrics.PlatformFamily,
 		Version:        c.agentVersion,
 		PrimaryIP:      systemMetrics.IPAddress,
 		KernelVersion:  systemMetrics.KernelVersion,

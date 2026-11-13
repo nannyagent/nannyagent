@@ -1,6 +1,0 @@
-[
-  {"type": "cluster", "name": "pxcluster", "nodes": 3, "quorate": 1, "version": 2, "id": "cluster-id"},
-  {"type": "node", "name": "node1", "local": 0, "id": "node/node1", "ip": "192.168.1.1", "nodeid": 1},
-  {"type": "node", "name": "node2", "local": 0, "id": "node/node2", "ip": "192.168.1.2", "nodeid": 2},
-  {"type": "node", "name": "node3", "local": 1, "id": "node/node3", "ip": "192.168.1.3", "nodeid": 3}
-]

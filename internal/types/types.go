@@ -250,7 +250,7 @@ type IngestMetricsRequest struct {
 	OSInfo         string   `json:"os_info,omitempty"`
 	OSVersion      string   `json:"os_version,omitempty"`
 	OSType         string   `json:"os_type,omitempty"`
-	PlatformFamily string   `json:"platform_family,omitempty"` // Required for patch management
+	PlatformFamily string   `json:"platform_family,omitempty"`
 	Version        string   `json:"version,omitempty"`
 	PrimaryIP      string   `json:"primary_ip,omitempty"`
 	KernelVersion  string   `json:"kernel_version,omitempty"`
@@ -455,27 +455,6 @@ type PendingInvestigation struct {
 	CreatedAt         time.Time              `json:"created_at"`
 }
 
-// PatchTask represents a patch management task
-type PatchTask struct {
-	ID        string    `json:"id"`
-	AgentID   string    `json:"agent_id"`
-	Command   string    `json:"command"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// PatchExecution represents a patch execution task from the database
-type PatchExecution struct {
-	ID            string    `json:"id"`
-	AgentID       string    `json:"agent_id"`
-	ScriptID      *string   `json:"script_id"`
-	ExecutionType string    `json:"execution_type"` // Allowed values: "dry_run", "apply". If a reboot is required after applying, set ShouldReboot to true.
-	Status        string    `json:"status"`         // pending, executing, completed, failed
-	Command       string    `json:"command"`
-	ShouldReboot  bool      `json:"should_reboot"` // Indicates if a reboot should be performed after execution. Used in conjunction with ExecutionType="apply".
-	CreatedAt     time.Time `json:"created_at"`
-}
-
 // DiagnosticAgent interface for agent functionality needed by other packages
 type DiagnosticAgent interface {
 	DiagnoseIssue(issue string) error
@@ -532,83 +511,3 @@ type InvestigationUpdateRequest struct {
 	Metadata       map[string]interface{} `json:"metadata,omitempty"`
 	EpisodeID      string                 `json:"episode_id,omitempty"`
 }
-
-// Patch Management Types
-// PatchMode represents patch operation mode
-type PatchMode string
-
-const (
-	PatchModeDryRun PatchMode = "dry-run"
-	PatchModeApply  PatchMode = "apply"
-)
-
-// PatchStatus represents patch operation lifecycle
-type PatchStatus string
-
-const (
-	PatchStatusPending    PatchStatus = "pending"
-	PatchStatusRunning    PatchStatus = "running"
-	PatchStatusCompleted  PatchStatus = "completed"
-	PatchStatusFailed     PatchStatus = "failed"
-	PatchStatusRolledBack PatchStatus = "rolled_back"
-)
-
-// AgentPatchPayload is sent to agent via realtime for execution
-type AgentPatchPayload struct {
-	OperationID string `json:"operation_id"`
-	Mode        string `json:"mode"` // dry-run or apply
-	ScriptID    string `json:"script_id"`
-	ScriptURL   string `json:"script_url"`
-	ScriptArgs  string `json:"script_args"`
-	LXCID       string `json:"lxc_id,omitempty"`
-	VMID        string `json:"vmid,omitempty"`
-	Timestamp   string `json:"timestamp"`
-}
-
-// AgentPatchResult is received from agent after execution
-type AgentPatchResult struct {
-	OperationID string             `json:"operation_id"`
-	Success     bool               `json:"success"`
-	OutputPath  string             `json:"output_path"` // Where agent stored output
-	ErrorMsg    string             `json:"error_msg"`
-	PackageList []PatchPackageInfo `json:"package_list"` // Packages that were changed
-	Duration    int64              `json:"duration_ms"`
-	LXCID       string             `json:"lxc_id,omitempty"`
-	Timestamp   string             `json:"timestamp"`
-}
-
-// PatchPackageInfo represents package info from agent response
-type PatchPackageInfo struct {
-	Name       string `json:"name"`
-	Version    string `json:"version"`
-	UpdateType string `json:"update_type"` // install, update, remove
-	Details    string `json:"details"`
-}
-
-// Reboot Management Types
-
-// RebootStatus represents reboot operation lifecycle
-type RebootStatus string
-
-const (
-	RebootStatusPending   RebootStatus = "pending"
-	RebootStatusSent      RebootStatus = "sent"
-	RebootStatusRebooting RebootStatus = "rebooting"
-	RebootStatusCompleted RebootStatus = "completed"
-	RebootStatusFailed    RebootStatus = "failed"
-	RebootStatusTimeout   RebootStatus = "timeout"
-)
-
-// AgentRebootPayload is sent to agent via realtime for execution
-type AgentRebootPayload struct {
-	RebootID       string `json:"reboot_id"`
-	AgentID        string `json:"agent_id"`
-	LXCID          string `json:"lxc_id,omitempty"`
-	VMID           string `json:"vmid,omitempty"`
-	Reason         string `json:"reason,omitempty"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
-	RequestedAt    string `json:"requested_at"`
-}
-
-// RebootHandler is a callback function that processes a reboot operation request
-type RebootHandler func(payload AgentRebootPayload)

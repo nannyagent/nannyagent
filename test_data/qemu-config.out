@@ -1,7 +1,0 @@
-{
-  "ostype": "l26",
-  "vmgenid": "8869332c-ab8d-4130-973c-ab7547588494",
-  "kvm": 1,
-  "boot": "order=scsi0;net0",
-  "cpu": "host"
-}

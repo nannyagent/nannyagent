@@ -102,7 +102,6 @@ All YAML configuration options are available as CLI flags with the highest prior
 | `--portal-url <url>` | `portal_url` | Portal URL for device auth |
 | `--token-path <path>` | `token_path` | Token storage path |
 | `--metrics-interval <secs>` | `metrics_interval` | Metrics collection interval |
-| `--proxmox-interval <secs>` | `proxmox_interval` | Proxmox data collection interval |
 | `--agent-id <id>` | `agent_id` | Agent ID (static token mode) |
 | `--debug` | `debug` | Enable debug mode |
 
@@ -146,7 +145,7 @@ error message and the agent will not start.
 | Length | Max 2 048 characters |
 | Format | Must be a parseable URL |
 
-### Intervals (`metrics_interval`, `proxmox_interval`)
+### Intervals (`metrics_interval`)
 
 | Rule | Detail |
 |------|--------|
@@ -227,9 +226,6 @@ token_path: /var/lib/nannyagent/token.json
 # Optional: Metrics collection interval in seconds (default: 30)
 metrics_interval: 30
 
-# Optional: Proxmox data collection interval in seconds (default: 300)
-proxmox_interval: 300
-
 # Optional: Refresh token renewal threshold in days (default: 7)
 token_renewal_threshold_days: 7
 
@@ -255,7 +251,6 @@ nannyapi_url: https://api.nannyai.dev
 portal_url: https://nannyai.dev
 token_path: /var/lib/nannyagent/token.json
 metrics_interval: 30
-proxmox_interval: 300
 debug: false
 EOF
 
@@ -383,21 +378,6 @@ System metrics collection interval in seconds.
 metrics_interval: 30   # Every 30 seconds (default)
 metrics_interval: 60   # Every minute
 metrics_interval: 300  # Every 5 minutes
-```
-
-**Note:** No environment variable override available for this setting.
-
-#### `proxmox_interval`
-
-Proxmox data collection interval in seconds.
-
-**Default:** `300` (5 minutes)
-
-**Examples:**
-```yaml
-proxmox_interval: 300   # Every 5 minutes (default)
-proxmox_interval: 600   # Every 10 minutes
-proxmox_interval: 1800  # Every 30 minutes
 ```
 
 **Note:** No environment variable override available for this setting.
@@ -539,7 +519,6 @@ nannyapi_url: https://api.nannyai.dev
 portal_url: https://nannyai.dev
 token_path: /var/lib/nannyagent/token.json
 metrics_interval: 30
-proxmox_interval: 300
 token_renewal_threshold_days: 7
 token_renewal_check_interval_secs: 21600
 token_renewal_retry_interval_secs: 3600
@@ -562,7 +541,6 @@ nannyapi_url: http://localhost:8090
 portal_url: http://localhost:8080
 debug: true
 metrics_interval: 60
-proxmox_interval: 600
 ```
 
 **Usage:**
@@ -814,9 +792,6 @@ token_path: /var/lib/nannyagent/token.json
 
 # Metrics collection every 30 seconds
 metrics_interval: 30
-
-# Proxmox data collection every 5 minutes
-proxmox_interval: 300
 
 # Disable debug logging in production
 debug: false

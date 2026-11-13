@@ -12,7 +12,6 @@ import (
 
 	"nannyagent/internal/logging"
 	"nannyagent/internal/nannyapi"
-	"nannyagent/internal/types"
 )
 
 // Backoff configuration constants
@@ -30,9 +29,6 @@ type RealtimeMessage struct {
 // InvestigationHandler is a callback function that processes an investigation request
 type InvestigationHandler func(investigationID, prompt string)
 
-// PatchHandler is a callback function that processes a patch operation request
-type PatchHandler func(payload types.AgentPatchPayload)
-
 // TokenProvider is an interface for fetching a fresh access token
 type TokenProvider interface {
 	GetCurrentAccessToken() (string, error)
@@ -43,18 +39,14 @@ type Client struct {
 	baseURL              string
 	tokenProvider        TokenProvider
 	investigationHandler InvestigationHandler
-	patchHandler         PatchHandler
-	rebootHandler        types.RebootHandler
 }
 
 // NewClient creates a new Realtime client
-func NewClient(baseURL string, tokenProvider TokenProvider, investigationHandler InvestigationHandler, patchHandler PatchHandler, rebootHandler types.RebootHandler) *Client {
+func NewClient(baseURL string, tokenProvider TokenProvider, investigationHandler InvestigationHandler) *Client {
 	return &Client{
 		baseURL:              baseURL,
 		tokenProvider:        tokenProvider,
 		investigationHandler: investigationHandler,
-		patchHandler:         patchHandler,
-		rebootHandler:        rebootHandler,
 	}
 }
 
@@ -170,10 +162,10 @@ func (c *Client) Start() {
 		logging.Debug("Connected! Client ID: %s", clientId)
 
 		// --- STEP 2: Authorize & Subscribe ---
-		// This is where you tell PB: "I am this Agent, listen to 'investigations', 'patch_operations', and 'reboot_operations'"
+		// This is where you tell PB: "I am this Agent, listen to 'investigations'"
 		subData, _ := json.Marshal(map[string]interface{}{
 			"clientId":      clientId,
-			"subscriptions": []string{"investigations", "patch_operations", "reboot_operations"},
+			"subscriptions": []string{"investigations"},
 		})
 
 		req, err = http.NewRequest(http.MethodPost, c.baseURL+nannyapi.EndpointRealtime, bytes.NewBuffer(subData))
@@ -209,7 +201,7 @@ func (c *Client) Start() {
 			time.Sleep(backoff)
 			continue
 		}
-		logging.Debug("Subscribed to 'investigations', 'patch_operations', and 'reboot_operations' successfully.")
+		logging.Debug("Subscribed to 'investigations' successfully.")
 
 		// Reset consecutive failures on successful connection
 		consecutiveFailures = 0
@@ -242,17 +234,7 @@ func (c *Client) Start() {
 
 				var msg RealtimeMessage
 				if err := json.Unmarshal([]byte(msgJSON), &msg); err == nil {
-					// Check if this is a reboot operation
 					if msg.Action == nannyapi.ActionCreate {
-						if c.handleRebootOperation(msg) {
-							continue
-						}
-
-						// Try to parse as patch operation
-						if c.handlePatchOperation(msg) {
-							continue
-						}
-
 						// Try to parse as investigation
 						c.handleInvestigation(msg)
 					}
@@ -270,129 +252,6 @@ func (c *Client) Start() {
 		logging.Debug("Reconnecting in %v...", backoff)
 		time.Sleep(backoff)
 	}
-}
-
-// handleRebootOperation processes a reboot operation message
-// Returns true if message was handled as a reboot operation
-func (c *Client) handleRebootOperation(msg RealtimeMessage) bool {
-	record := msg.Record
-
-	// Check for reboot operation indicators
-	rebootID, hasID := record["id"].(string)
-	if !hasID {
-		return false
-	}
-
-	// Check for status field with value "sent" (reboot operations have this)
-	status, hasStatus := record["status"].(string)
-	if !hasStatus || status != "sent" {
-		return false
-	}
-
-	// Check for timeout_seconds field (unique to reboot operations)
-	_, hasTimeout := record["timeout_seconds"]
-	if !hasTimeout {
-		return false
-	}
-
-	// This is a reboot operation
-	payload := types.AgentRebootPayload{
-		RebootID: rebootID,
-	}
-
-	// Extract agent_id
-	if agentID, ok := record["agent_id"].(string); ok {
-		payload.AgentID = agentID
-	}
-
-	// Extract optional LXC ID
-	if lxcID, ok := record["lxc_id"].(string); ok {
-		payload.LXCID = lxcID
-	}
-
-	// Extract optional VMID
-	if vmid, ok := parseVMID(record["vmid"]); ok {
-		payload.VMID = vmid
-	}
-
-	// Extract reason
-	if reason, ok := record["reason"].(string); ok {
-		payload.Reason = reason
-	}
-
-	// Extract timeout_seconds
-	if timeout, ok := record["timeout_seconds"].(float64); ok {
-		payload.TimeoutSeconds = int(timeout)
-	}
-
-	// Extract requested_at
-	if requestedAt, ok := record["requested_at"].(string); ok {
-		payload.RequestedAt = requestedAt
-	}
-
-	logging.Info("Received reboot operation: %s", rebootID)
-
-	if c.rebootHandler != nil {
-		go c.rebootHandler(payload)
-	}
-	return true
-}
-
-// handlePatchOperation processes a patch operation message
-// Returns true if message was handled as a patch operation
-func (c *Client) handlePatchOperation(msg RealtimeMessage) bool {
-	record := msg.Record
-
-	operationID, ok := record["id"].(string)
-	if !ok {
-		return false
-	}
-
-	mode, okMode := record["mode"].(string)
-	if !okMode {
-		return false
-	}
-
-	scriptID, okScript := record["script_id"].(string)
-	if !okScript {
-		return false
-	}
-
-	scriptURL, okURL := record["script_url"].(string)
-	if !okURL {
-		return false
-	}
-
-	// This is a patch operation
-	payload := types.AgentPatchPayload{
-		OperationID: operationID,
-		Mode:        mode,
-		ScriptURL:   scriptURL,
-		ScriptID:    scriptID,
-		Timestamp:   time.Now().Format(time.RFC3339),
-	}
-
-	// Optional script args
-	if args, okArgs := record["script_args"].(string); okArgs {
-		payload.ScriptArgs = args
-	}
-
-	// Optional LXC ID
-	if lxcID, okLXC := record["lxc_id"].(string); okLXC {
-		payload.LXCID = lxcID
-	}
-
-	// Optional VMID
-	if vmid, ok := parseVMID(record["vmid"]); ok {
-		payload.VMID = vmid
-	}
-
-	logging.Info("Received patch operation: %s (mode: %s)", operationID, mode)
-
-	if c.patchHandler != nil {
-		go c.patchHandler(payload)
-	}
-	return true
 }
 
 // handleInvestigation processes an investigation message
@@ -417,22 +276,5 @@ func (c *Client) handleInvestigation(msg RealtimeMessage) {
 		if c.investigationHandler != nil {
 			go c.investigationHandler(investigationID, prompt)
 		}
-	}
-}
-
-func parseVMID(v interface{}) (string, bool) {
-	switch v := v.(type) {
-	case string:
-		return v, true
-	case float64:
-		// Use %v to preserve as integer representation without decimal
-		return fmt.Sprintf("%v", v), true
-	case int, int32, int64:
-		return fmt.Sprintf("%d", v), true
-	case nil:
-		return "", false
-	default:
-		// Try string conversion as fallback
-		return fmt.Sprintf("%v", v), true
 	}
 }

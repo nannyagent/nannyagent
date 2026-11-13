@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"nannyagent/internal/nannyapi"
-	"nannyagent/internal/types"
 )
 
 // staticTokenProvider is a test double that always returns the same token.
@@ -68,7 +67,7 @@ func TestClient_Start(t *testing.T) {
 		close(done)
 	}
 
-	client := NewClient(server.URL, mockToken("test-token"), handler, nil, nil)
+	client := NewClient(server.URL, mockToken("test-token"), handler)
 
 	// Run Start in a goroutine
 	go client.Start()
@@ -144,122 +143,6 @@ func TestCalculateBackoff_NegativeAttempt(t *testing.T) {
 	}
 }
 
-// TestClient_RebootHandler tests that reboot operations are handled correctly
-func TestClient_RebootHandler(t *testing.T) {
-	// Create a mock SSE server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == nannyapi.EndpointRealtime {
-			switch r.Method {
-			case "GET":
-				w.Header().Set("Content-Type", "text/event-stream")
-				w.Header().Set("Cache-Control", "no-cache")
-				w.Header().Set("Connection", "keep-alive")
-
-				// Send clientId
-				_, _ = fmt.Fprintf(w, "data: {\"clientId\": \"test-client-id\"}\n\n")
-				w.(http.Flusher).Flush()
-
-				time.Sleep(100 * time.Millisecond)
-
-				// Send a reboot operation event
-				rebootEvent := fmt.Sprintf(`{"action": %q, "record": {"id": "reboot-123", "agent_id": "agent-456", "status": "sent", "timeout_seconds": 300, "reason": "maintenance", "requested_at": "2026-01-24T10:00:00Z"}}`, nannyapi.ActionCreate)
-				_, _ = fmt.Fprintf(w, "data: %s\n\n", rebootEvent)
-				w.(http.Flusher).Flush()
-
-				time.Sleep(1 * time.Second)
-				return
-			case "POST":
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer server.Close()
-
-	done := make(chan struct{})
-
-	rebootHandler := func(payload types.AgentRebootPayload) {
-		if payload.RebootID != "reboot-123" {
-			t.Errorf("Expected RebootID 'reboot-123', got '%s'", payload.RebootID)
-		}
-		if payload.AgentID != "agent-456" {
-			t.Errorf("Expected AgentID 'agent-456', got '%s'", payload.AgentID)
-		}
-		if payload.TimeoutSeconds != 300 {
-			t.Errorf("Expected TimeoutSeconds 300, got %d", payload.TimeoutSeconds)
-		}
-		close(done)
-	}
-
-	client := NewClient(server.URL, mockToken("test-token"), nil, nil, rebootHandler)
-
-	go client.Start()
-
-	select {
-	case <-done:
-		// Success
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timeout waiting for reboot handler")
-	}
-}
-
-// TestClient_PatchHandler tests that patch operations are handled correctly
-func TestClient_PatchHandler(t *testing.T) {
-	// Create a mock SSE server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == nannyapi.EndpointRealtime {
-			switch r.Method {
-			case "GET":
-				w.Header().Set("Content-Type", "text/event-stream")
-				w.Header().Set("Cache-Control", "no-cache")
-				w.Header().Set("Connection", "keep-alive")
-
-				_, _ = fmt.Fprintf(w, "data: {\"clientId\": \"test-client-id\"}\n\n")
-				w.(http.Flusher).Flush()
-
-				time.Sleep(100 * time.Millisecond)
-
-				// Send a patch operation event
-				patchEvent := fmt.Sprintf(`{"action": %q, "record": {"id": "patch-123", "mode": "dry-run", "script_id": "script-456", "script_url": "/scripts/test.sh"}}`, nannyapi.ActionCreate)
-				_, _ = fmt.Fprintf(w, "data: %s\n\n", patchEvent)
-				w.(http.Flusher).Flush()
-
-				time.Sleep(1 * time.Second)
-				return
-			case "POST":
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer server.Close()
-
-	done := make(chan struct{})
-
-	patchHandler := func(payload types.AgentPatchPayload) {
-		if payload.OperationID != "patch-123" {
-			t.Errorf("Expected OperationID 'patch-123', got '%s'", payload.OperationID)
-		}
-		if payload.Mode != "dry-run" {
-			t.Errorf("Expected Mode 'dry-run', got '%s'", payload.Mode)
-		}
-		close(done)
-	}
-
-	client := NewClient(server.URL, mockToken("test-token"), nil, patchHandler, nil)
-
-	go client.Start()
-
-	select {
-	case <-done:
-		// Success
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timeout waiting for patch handler")
-	}
-}
-
 func TestClient_SubscriptionRequestUsesBearerAuth(t *testing.T) {
 	subscriptionChecked := make(chan struct{}, 1)
 
@@ -296,7 +179,7 @@ func TestClient_SubscriptionRequestUsesBearerAuth(t *testing.T) {
 			if payload.ClientID != "subscription-client-id" {
 				t.Errorf("Expected clientId subscription-client-id, got %q", payload.ClientID)
 			}
-			expected := []string{"investigations", "patch_operations", "reboot_operations"}
+			expected := []string{"investigations"}
 			if len(payload.Subscriptions) != len(expected) {
 				t.Fatalf("Expected %d subscriptions, got %d", len(expected), len(payload.Subscriptions))
 			}
@@ -314,7 +197,7 @@ func TestClient_SubscriptionRequestUsesBearerAuth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, mockToken("subscription-token"), nil, nil, nil)
+	client := NewClient(server.URL, mockToken("subscription-token"), nil)
 	go client.Start()
 
 	select {
